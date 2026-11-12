@@ -1,0 +1,3 @@
+#!/system/bin/sh
+# 终端快捷命令：su -c x4lc3 <命令>
+exec sh /data/adb/modules/enco_x4_lc3/x4lc3.sh "$@"

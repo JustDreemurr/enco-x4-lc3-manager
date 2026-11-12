@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Enco X4 LC3</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Enco X4 LC3</h1>
+      <span id="version" class="muted"></span>
+    </header>
+
+    <section class="card" id="status-card">
+      <div class="status-row">
+        <div>
+          <div class="label">全局 LC3</div>
+          <div id="lc3-state" class="big">加载中…</div>
+          <div id="lea-device" class="muted"></div>
+        </div>
+        <button id="btn-toggle" class="primary" disabled>—</button>
+      </div>
+      <ul id="warnings" class="warnings"></ul>
+      <dl class="details">
+        <dt>游戏态包名</dt><dd id="d-savegame">—</dd>
+        <dt>debug_gamemode_value</dt><dd id="d-value">—</dd>
+        <dt>低延迟偏好</dt><dd id="d-prefer">—</dd>
+        <dt>共存开关</dt><dd id="d-coexist">—</dd>
+        <dt>守护进程</dt><dd id="d-watchdog">—</dd>
+      </dl>
+      <details>
+        <summary>最近的活动设备切换</summary>
+        <pre id="events" class="mono"></pre>
+      </details>
+      <button id="btn-refresh" class="ghost">刷新状态</button>
+    </section>
+
+    <section class="card">
+      <h2>自定义白名单</h2>
+      <p class="muted">加入白名单的应用被系统识别为游戏时会自动切到 LC3；全局开关也会从这里挑选已安装的应用。改动需重启蓝牙（耳机短暂断开）。</p>
+      <ul id="whitelist" class="list"></ul>
+      <form id="add-form" class="row">
+        <input id="add-input" list="pkg-list" placeholder="输入或选择包名" autocomplete="off" spellcheck="false">
+        <datalist id="pkg-list"></datalist>
+        <button type="submit">添加</button>
+      </form>
+      <details>
+        <summary>系统内置白名单（已安装）</summary>
+        <ul id="builtin" class="list compact"></ul>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>设置</h2>
+      <label class="switch-row">
+        <span>开机自动恢复<small class="muted">重启后保持上次的全局 LC3 状态</small></span>
+        <input type="checkbox" id="cfg-restore">
+      </label>
+      <label class="switch-row">
+        <span>守护进程<small class="muted">游戏态被系统改回时自动恢复，并监控 conf 是否被云控覆盖（每次恢复都会记入日志）</small></span>
+        <input type="checkbox" id="cfg-watchdog">
+      </label>
+      <label class="field-row">
+        <span>检查间隔（秒）</span>
+        <input type="number" id="cfg-interval" min="3" max="600">
+      </label>
+      <label class="field-row">
+        <span>游戏态包名</span>
+        <select id="cfg-anchor"></select>
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>工具</h2>
+      <div class="row wrap">
+        <button id="btn-restart">重启蓝牙</button>
+        <button id="btn-log">查看日志</button>
+        <button id="btn-reset" class="danger">撤销全部改动</button>
+      </div>
+      <pre id="output" class="mono hidden"></pre>
+    </section>
+
+    <footer class="muted">
+      非官方用法，风险自负。
+    </footer>
+  </main>
+
+  <div id="busy" class="busy hidden"><div class="spinner"></div><span id="busy-text"></span></div>
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
