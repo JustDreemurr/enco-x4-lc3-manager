@@ -144,7 +144,7 @@ function render(s) {
     warnings.appendChild(li('没有可用的白名单应用：请先在下方添加一个已安装的应用'));
   }
   if (s.leacoexist !== 'true') {
-    warnings.appendChild(li(`persist.sys.bt.leacoexist=${s.leacoexist || '空'}，本机可能不走双模共存逻辑`));
+    warnings.appendChild(li(`persist.sys.bt.leacoexist=${s.leacoexist || '空'}：本机蓝牙可能未启用双模共存，全局 LC3 很可能无效。请点“工具 → 收集诊断信息”`));
   }
 
   const g = s.gamemode;
@@ -285,6 +285,20 @@ function bind() {
   $('btn-log').addEventListener('click', async () => {
     const r = await cli('log');
     showOutput(r.stdout.trim() || '（日志为空）');
+  });
+
+  $('btn-diag').addEventListener('click', async () => {
+    if (busy) return;
+    setBusy(true, '正在收集诊断信息…');
+    try {
+      const r = await cli('diag');
+      showOutput(r.stdout.trim() || r.stderr.trim());
+      toast(lastLine(r.stdout) || '完成');
+    } catch (e) {
+      toast(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
   });
 
   $('btn-reset').addEventListener('click', async () => {

@@ -286,6 +286,10 @@ cmd_on() {
   if [ -f "$PENDING" ] && ! is_builtin "$_pkg"; then
     say "警告: 白名单改动尚未生效，请先重启蓝牙"
   fi
+  _co=$(getprop persist.sys.bt.leacoexist)
+  if [ "$_co" != true ]; then
+    say "警告: persist.sys.bt.leacoexist=${_co:-空}，本机蓝牙可能未启用双模共存，全局 LC3 很可能无效（可运行 diag 排查）"
+  fi
   backup_settings
   apply_gamemode "$_pkg"
   echo on > "$STATE"
@@ -433,6 +437,47 @@ cmd_status() {
   fi
 }
 
+# ---------- 诊断 ----------
+
+# 蓝牙 MAC 只保留后两段
+mask_mac() { sed -E 's/([0-9A-Fa-f]{2}:){4}([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})/XX:XX:XX:XX:\2/g'; }
+
+cmd_diag() {
+  _out=${X4LC3_DIAG_DIR:-/sdcard/Download}/x4lc3-diag-$(date +%Y%m%d-%H%M%S).txt
+  {
+    echo "== 模块 $VERSION / $(detect_manager)"
+    echo "== 设备"
+    for _k in ro.product.brand ro.product.model ro.product.name ro.build.display.id \
+              ro.build.version.oplusrom ro.build.version.release ro.build.version.sdk; do
+      echo "$_k=$(getprop "$_k")"
+    done
+    echo; echo "== 蓝牙相关属性"
+    getprop | grep -iE 'leacoexist|leaudio|le_audio|bap|lc3|low_latency|dual|a2dp|lhdc|bluetooth\.profile'
+    echo; echo "== settings"
+    for _k in bluetooth_on debug_gamemode_value debug_gamemode_savegame oplus_games_low_latency_state; do
+      echo "$_k=$(sget "$_k")"
+    done
+    echo; echo "== 模块状态"
+    cmd_status
+    echo; echo "== 自定义白名单"; wl_read
+    echo; echo "== $CONF"; cat "$CONF" 2>/dev/null || echo "（不存在）"
+    echo; echo "== dual_mode_support.xml"
+    cat /data/user_de/0/*bluetooth*/shared_prefs/dual_mode_support.xml 2>/dev/null || echo "（不存在）"
+    echo; echo "== PeerSmartAudioFeature（X4 应为 56318 / 0xDBFE）"
+    grep -E '^\[|PeerSmartAudioFeature' /data/misc/bluedroid/bt_remote_dev_info.conf 2>/dev/null | grep -B1 PeerSmartAudioFeature
+    echo; echo "== bt_config.conf（名称 / LE Audio 相关）"
+    grep -iE '^\[|^Name|LeAudio|Lc3|DevType' /data/misc/bluedroid/bt_config.conf 2>/dev/null | grep -iE -B2 'enco|LeAudio|Lc3' | head -n 60
+    echo; echo "== dumpsys bluetooth_manager（编码 / LE Audio）"
+    dumpsys bluetooth_manager 2>/dev/null | tr -d '\000\r' | grep -iE 'codec|LeAudio|LE_AUDIO|DualMode|DualConnection|Active Device' | head -n 80
+    echo; echo "== logcat"
+    logcat -d -b all 2>/dev/null | grep -iE 'OplusDualMode|isDualConnection|oplusHandleLea|BluetoothLowLatency|leacoexist|SmartAudioFeature|GameSpaceMode' | tail -n 80
+    echo; echo "== 模块日志"; tail -n 50 "$LOG" 2>/dev/null
+  } 2>&1 | mask_mac > "$_out"
+  cat "$_out"
+  echo
+  echo "诊断信息已保存到 $_out"
+}
+
 # ---------- 白名单命令 ----------
 
 cmd_add() {
@@ -549,6 +594,7 @@ x4lc3 $VERSION — OPPO Enco X4 全局 LC3 管理（需 root）
   watchdog start|stop|status
   pkgs                 列出已安装的第三方应用
   log                  查看日志
+  diag                 收集诊断信息（保存到 /sdcard/Download）
   reset                撤销全部改动（关闭 LC3、清空白名单、还原 conf）
 EOF
 }
@@ -594,6 +640,7 @@ case $CMD in
     esac ;;
   pkgs) pm list packages -3 2>/dev/null | tr -d '\r' | sed 's/^package://' | sort ;;
   log) tail -n 100 "$LOG" 2>/dev/null ;;
+  diag) cmd_diag ;;
   reset) cmd_reset ;;
   early) cmd_early ;;
   boot) cmd_boot ;;
