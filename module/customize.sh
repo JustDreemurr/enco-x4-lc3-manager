@@ -22,10 +22,11 @@ fi
 
 COEXIST=$(getprop persist.sys.bt.leacoexist)
 if [ "$COEXIST" != true ]; then
-  ui_print "! persist.sys.bt.leacoexist=$COEXIST，本机可能不走双模共存逻辑"
+  ui_print "! 双模共存开关 persist.sys.bt.leacoexist 未开启（当前: ${COEXIST:-空}）"
+  ui_print "! 重启后在 WebUI“前置条件”中一键开启，或执行 su -c x4lc3 coexist on"
 fi
 
-ui_print "! 仅在 OnePlus 16 PYB110_17.0.1.201 上验证过原理，其他机型/固件请自行测试"
+ui_print "- 已验证: OnePlus 16 PYB110_17.0.1.201、OnePlus 13 PJZ110_17.0.0.103"
 
 if [ "$KSU" != true ] && [ "$APATCH" != true ]; then
   ui_print "- Magisk 没有内置 WebUI：可用 KsuWebUI / WebUI X 打开本模块界面"

@@ -286,9 +286,16 @@ cmd_on() {
   if [ -f "$PENDING" ] && ! is_builtin "$_pkg"; then
     say "警告: 白名单改动尚未生效，请先重启蓝牙"
   fi
-  _co=$(getprop persist.sys.bt.leacoexist)
-  if [ "$_co" != true ]; then
-    say "警告: persist.sys.bt.leacoexist=${_co:-空}，本机蓝牙可能未启用双模共存，全局 LC3 很可能无效（可运行 diag 排查）"
+  # 前置条件不满足时，游戏态只会触发经典 A2DP 低延迟（耳机降为 SBC），因此默认拒绝
+  _probs=$(prereq_problems)
+  if [ -n "$_probs" ]; then
+    if [ "$FORCE" = 1 ]; then
+      say "警告: 前置条件未满足（--force 继续）: $(printf '%s' "$_probs" | tr '\n' ';')"
+    else
+      die "前置条件未满足，开启游戏态只会让耳机降为 SBC：
+$(printf '%s\n' "$_probs" | sed 's/^/  - /')
+请在 WebUI 中一键修复，或执行 x4lc3 coexist on / x4lc3 pref on" 3
+    fi
   fi
   backup_settings
   apply_gamemode "$_pkg"
@@ -355,16 +362,39 @@ wd_loop() {
 
 # ---------- 状态 ----------
 
-lea_events() {
-  dumpsys bluetooth_manager 2>/dev/null | tr -d '\000\r' | grep "Active Device Changed" | tail -n 6 | sed 's/^[[:space:]]*//'
+# dumpsys bluetooth_manager 只读一次，存到临时文件供下面几个函数解析
+load_bt_dump() {
+  BTDUMP=$DATA/btdump.tmp
+  dumpsys bluetooth_manager 2>/dev/null | tr -d '\000\r' > "$BTDUMP"
 }
 
-# 根据最近一次 LE_AUDIO 活动设备事件推断：true / false / null
-lea_state() {
-  _l=$(printf '%s\n' "$1" | grep "LE_AUDIO" | tail -n 1)
-  if [ -z "$_l" ]; then echo null
-  elif echo "$_l" | grep -qi "Changed: null"; then echo false
-  else echo true; fi
+# BluetoothActiveDeviceManager 段中某个 profile（"A2DP" / "LE Audio"）的当前活动设备，NULL 表示无
+adm_active() {
+  awk -v want="$1" '
+    /^BluetoothActiveDeviceManager$/ { inadm = 1; next }
+    inadm && /event log/ { exit }
+    inadm && /^  [^ ].*:$/ { cur = $0; sub(/^  /, "", cur); sub(/:$/, "", cur); next }
+    inadm && cur == want && /^    Active:/ { v = $0; sub(/^    Active:[ ]*/, "", v); print v; exit }' "$BTDUMP"
+}
+
+lea_events() { grep "for profile:" "$BTDUMP" | tail -n 6 | sed 's/^[[:space:]]*//'; }
+
+# 当前音频走向：le / classic / none / off / unknown
+audio_route() {
+  bt_on || { echo off; return; }
+  _le=$(adm_active "LE Audio"); _a2=$(adm_active "A2DP")
+  if [ -z "$_le$_a2" ]; then echo unknown
+  elif [ -n "$_le" ] && [ "$_le" != NULL ]; then echo le
+  elif [ -n "$_a2" ] && [ "$_a2" != NULL ]; then echo classic
+  else echo none; fi
+}
+
+# 当前编码：LE Audio 取 ASE 流配置名（如 Lc3_48_2_Low_Latency），经典蓝牙取 A2DP Current Codec
+current_codec() {
+  case $1 in
+    le) grep -m1 -E '(Stream|Active) config:' "$BTDUMP" | sed 's/.*config:[ ]*//; s/"//g' ;;
+    classic) grep -m1 'Current Codec: ' "$BTDUMP" | sed 's/.*Current Codec:[ ]*//' ;;
+  esac
 }
 
 json_esc() { printf '%s' "$1" | tr -d '\r' | tr '\t' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -373,10 +403,12 @@ jbool() { if "$@"; then printf true; else printf false; fi; }
 
 cmd_status_json() {
   load_pkgs
+  load_bt_dump
   _ev=$(lea_events)
   bt_on && _bt=true || _bt=false
-  _lea=$(lea_state "$_ev")
-  [ "$_bt" = false ] && _lea=false
+  _route=$(audio_route)
+  _codec=$(current_codec "$_route")
+  rm -f "$BTDUMP"
   _anchor=$(pick_anchor)
   printf '{'
   printf '"version":%s,"manager":%s,' "$(jstr "$VERSION")" "$(jstr "$(detect_manager)")"
@@ -384,7 +416,26 @@ cmd_status_json() {
   printf '"gamemode":{"value":%s,"savegame":%s,"userPrefer":%s,"llProp":%s},' \
     "$(jstr "$(sget debug_gamemode_value)")" "$(jstr "$(sget debug_gamemode_savegame)")" \
     "$(jstr "$(sget oplus_games_low_latency_state)")" "$(jstr "$(getprop ro.oplus.audio.support.low_latency_game)")"
-  printf '"leacoexist":%s,"btOn":%s,"leaActive":%s,' "$(jstr "$(getprop persist.sys.bt.leacoexist)")" "$_bt" "$_lea"
+  printf '"leacoexist":%s,"btOn":%s,"route":%s,"codec":%s,' "$(jstr "$(getprop persist.sys.bt.leacoexist)")" "$_bt" \
+    "$(jstr "$_route")" "$(jstr "$_codec")"
+  printf '"coexistByModule":%s,"prefFeature":%s,' "$(jbool test -f "$COEXIST_ORIG")" "$(jbool pref_feature_on)"
+  printf '"dualDevices":['
+  _f=1
+  for _m in $(dual_macs); do
+    [ $_f = 1 ] || printf ','; _f=0
+    printf '{"label":%s,"pref":%s}' "$(jstr "$(dev_label "$_m")")" "$(jstr "$(pref_get_key "$(pref_key "$_m")")")"
+  done
+  printf '],"problems":['
+  _f=1
+  _IFS=$IFS; IFS='
+'
+  for _l in $(prereq_problems); do
+    [ $_f = 1 ] || printf ','; _f=0
+    printf '%s' "$(jstr "$_l")"
+  done
+  IFS=$_IFS
+  printf '],'
+
   printf '"anchor":%s,"activePkg":%s,' "$(jstr "$_anchor")" "$(jstr "$(cat "$ACTIVE" 2>/dev/null)")"
   printf '"pendingRestart":%s,"watchdog":%s,' "$(jbool test -f "$PENDING")" "$(jbool wd_running)"
   printf '"config":{"restoreOnBoot":%s,"watchdog":%s,"watchInterval":%s,"anchor":%s},' \
@@ -416,25 +467,155 @@ cmd_status_json() {
 }
 
 cmd_status() {
+  load_bt_dump
   _ev=$(lea_events)
-  _lea=$(lea_state "$_ev")
-  bt_on || _lea=bt_off
-  case $_lea in
-    true) _dev="LE Audio（LC3）" ;;
-    false) _dev="经典蓝牙（A2DP）" ;;
-    bt_off) _dev="蓝牙已关闭" ;;
+  _route=$(audio_route)
+  _codec=$(current_codec "$_route")
+  rm -f "$BTDUMP"
+  case $_route in
+    le) _dev="LE Audio（$_codec）" ;;
+    classic) _dev="经典蓝牙 A2DP（$_codec）" ;;
+    none) _dev="无活动音频设备" ;;
+    off) _dev="蓝牙已关闭" ;;
     *) _dev="未知" ;;
   esac
   if effective_on; then echo "全局 LC3: 已开启"; else echo "全局 LC3: 未开启"; fi
-  echo "活动设备（据最近事件推断）: $_dev"
+  echo "当前音频: $_dev"
   echo "游戏态: value=$(sget debug_gamemode_value), package=$(sget debug_gamemode_savegame), user_prefer=$(sget oplus_games_low_latency_state)"
   echo "共存开关 persist.sys.bt.leacoexist=$(getprop persist.sys.bt.leacoexist)"
+  for _m in $(dual_macs); do echo "双连接偏好 $(dev_label "$_m"): $(pref_get_key "$(pref_key "$_m")")"; done
+  _probs=$(prereq_problems)
+  [ -n "$_probs" ] && printf '前置条件未满足:\n%s\n' "$(printf '%s\n' "$_probs" | sed 's/^/  - /')"
   [ -f "$PENDING" ] && echo "白名单改动待重启蓝牙后生效"
   wd_running && echo "守护进程: 运行中" || echo "守护进程: 未运行"
   if [ -n "$_ev" ]; then
     echo "最近的活动设备切换:"
     printf '%s\n' "$_ev" | tail -n 4 | sed 's/^/  /'
   fi
+}
+
+# ---------- 前置条件：双模共存开关 / 双连接偏好 ----------
+#
+# 1. persist.sys.bt.leacoexist：OplusBtFeatureConfigHelper 以 getBoolean(..., false) 读取，
+#    蓝牙进程启动时读一次。一加 13（PJZ110）等机型默认未设置 → 双模功能关闭。
+# 2. oplus_lea_dual_connection_preference_<sha256(MAC)>：存于 OPLUS 设置库
+#    content://com.oplus.appplatform.settings/global，isDualConnectionNeeded() 要求为 1。
+#    通常由欢律 App 游戏模式的 LC3 低延迟开关经耳机回传写入；蓝牙进程监听该键，改动即时生效。
+#    属性 persist.sys.oplus.dual_connection_preference_enabled=false 时不检查此项。
+
+COEXIST_PROP=persist.sys.bt.leacoexist
+PREF_URI=content://com.oplus.appplatform.settings/global
+PREF_PREFIX=oplus_lea_dual_connection_preference_
+COEXIST_ORIG=$DATA/coexist_orig   # 模块修改共存开关前的原值（存在即表示由模块开启）
+PREF_SET=$DATA/pref_set           # 模块写过的偏好：<键>=<原值>
+
+coexist_on() { [ "$(getprop $COEXIST_PROP)" = true ]; }
+pref_feature_on() { [ "$(getprop persist.sys.oplus.dual_connection_preference_enabled)" != false ]; }
+
+# 被系统判为支持双模（耳机上报共存特性位，如 X4）的设备 MAC
+DUAL_XML_PATHS="/data/user_de/0/com.android.bluetooth/shared_prefs/dual_mode_support.xml
+/data/user_de/0/com.google.android.bluetooth/shared_prefs/dual_mode_support.xml"
+dual_xml() { for _x in $DUAL_XML_PATHS; do [ -f "$_x" ] && cat "$_x"; done; }
+
+dual_macs() {
+  dual_xml |
+    sed -n 's/.*name="\([0-9A-Fa-f:]\{17\}\)" value="true".*/\1/p' | tr a-f A-F
+}
+
+dev_label() {
+  _n=$(awk -v s="[$(echo "$1" | tr A-F a-f)]" '
+    /^\[/ { insec = (tolower($0) == s); next }
+    insec && /^Name[ \t]*=/ { sub(/^Name[ \t]*=[ \t]*/, ""); print; exit }' /data/misc/bluedroid/bt_config.conf 2>/dev/null)
+  echo "${_n:-未知设备} (…${1#????????????})"
+}
+
+pref_key() { printf '%s%s' "$PREF_PREFIX" "$(printf '%s' "$1" | sha256sum | cut -c1-64)"; }
+pref_get_key() {
+  content call --uri "$PREF_URI" --method GET_global --arg "$1" 2>/dev/null |
+    tr -d '\r' | sed -n 's/.*value=\([^,}]*\).*/\1/p'
+}
+pref_put_key() { content call --uri "$PREF_URI" --method PUT_global --arg "$1" --extra "value:s:$2" >/dev/null 2>&1; }
+
+# 输出未满足的前置条件（每行一条），全部满足时无输出
+prereq_problems() {
+  coexist_on || echo "双模共存开关 $COEXIST_PROP 未开启"
+  pref_feature_on || return 0
+  _macs=$(dual_macs)
+  if [ -z "$_macs" ]; then
+    echo "未发现支持双模的耳机（请先连接一次 X4）"
+    return 0
+  fi
+  for _m in $_macs; do
+    [ "$(pref_get_key "$(pref_key "$_m")")" = 1 ] && return 0
+  done
+  echo "耳机的双连接偏好未开启（欢律 → 游戏模式 → LC3 低延迟）"
+}
+
+cmd_coexist() {
+  case $1 in
+    on)
+      if coexist_on; then say "双模共存开关已是开启状态"; return 0; fi
+      [ -f "$COEXIST_ORIG" ] || getprop $COEXIST_PROP > "$COEXIST_ORIG"
+      setprop $COEXIST_PROP true || die "setprop $COEXIST_PROP 失败"
+      say "已开启双模共存开关（蓝牙进程启动时读取）"
+      if [ "$NO_RESTART" = 1 ]; then say "重启蓝牙后生效"; else restart_bt; fi
+      ;;
+    off)
+      coexist_restore || { say "双模共存开关不是由本模块开启的，已跳过"; return 0; }
+      if [ "$NO_RESTART" = 1 ]; then say "重启蓝牙后生效"; else restart_bt; fi
+      ;;
+    *)
+      echo "$COEXIST_PROP=$(getprop $COEXIST_PROP)"
+      [ -f "$COEXIST_ORIG" ] && echo "（由本模块开启，原值: $(cat "$COEXIST_ORIG")）"
+      ;;
+  esac
+}
+
+# 恢复模块开启前的共存开关；不是模块开启的返回 1
+coexist_restore() {
+  [ -f "$COEXIST_ORIG" ] || return 1
+  [ "$(state_get)" = on ] && cmd_off
+  _o=$(cat "$COEXIST_ORIG")
+  setprop $COEXIST_PROP "${_o:-false}"
+  rm -f "$COEXIST_ORIG"
+  say "已还原双模共存开关为 ${_o:-false}"
+  return 0
+}
+
+cmd_pref() {
+  case $1 in
+    on|off)
+      _v=1; [ "$1" = off ] && _v=0
+      _macs=$(dual_macs)
+      [ -n "$_macs" ] || die "未发现支持双模的耳机（请先连接一次 X4）"
+      for _m in $_macs; do
+        _k=$(pref_key "$_m")
+        _old=$(pref_get_key "$_k")
+        [ "$_old" = "$_v" ] && { say "$(dev_label "$_m"): 双连接偏好已是 $_v"; continue; }
+        grep -q "^$_k=" "$PREF_SET" 2>/dev/null || echo "$_k=$_old" >> "$PREF_SET"
+        pref_put_key "$_k" "$_v"
+        say "$(dev_label "$_m"): 双连接偏好 ${_old:-空} → $_v"
+      done
+      ;;
+    *)
+      pref_feature_on || echo "（本机未启用双连接偏好检查）"
+      for _m in $(dual_macs); do
+        echo "$(dev_label "$_m"): $(pref_get_key "$(pref_key "$_m")")"
+      done
+      ;;
+  esac
+}
+
+# 还原模块写过的双连接偏好
+pref_restore() {
+  [ -s "$PREF_SET" ] || return 1
+  while IFS='=' read -r _k _o; do
+    [ -n "$_k" ] || continue
+    pref_put_key "$_k" "${_o:-0}"
+  done < "$PREF_SET"
+  rm -f "$PREF_SET"
+  say "已还原耳机的双连接偏好"
+  return 0
 }
 
 # ---------- 诊断 ----------
@@ -457,12 +638,16 @@ cmd_diag() {
     for _k in bluetooth_on debug_gamemode_value debug_gamemode_savegame oplus_games_low_latency_state; do
       echo "$_k=$(sget "$_k")"
     done
+    echo; echo "== 前置条件"
+    cmd_coexist
+    cmd_pref
+    prereq_problems
     echo; echo "== 模块状态"
     cmd_status
     echo; echo "== 自定义白名单"; wl_read
     echo; echo "== $CONF"; cat "$CONF" 2>/dev/null || echo "（不存在）"
     echo; echo "== dual_mode_support.xml"
-    cat /data/user_de/0/*bluetooth*/shared_prefs/dual_mode_support.xml 2>/dev/null || echo "（不存在）"
+    _dx=$(dual_xml); echo "${_dx:-（不存在）}"
     echo; echo "== PeerSmartAudioFeature（X4 应为 56318 / 0xDBFE）"
     grep -E '^\[|PeerSmartAudioFeature' /data/misc/bluedroid/bt_remote_dev_info.conf 2>/dev/null | grep -B1 PeerSmartAudioFeature
     echo; echo "== bt_config.conf（名称 / LE Audio 相关）"
@@ -536,8 +721,10 @@ cmd_config() {
 cmd_reset() {
   watchdog_stop
   cmd_off
-  : > "$WL"
+  pref_restore
   _changed=0
+  coexist_restore && _changed=1
+  : > "$WL"
   conf_sync && _changed=1
   rm -f "$APPLIED" "$BASE"
   say "已清空自定义白名单并还原 conf"
@@ -574,7 +761,8 @@ usage() {
 x4lc3 $VERSION — OPPO Enco X4 全局 LC3 管理（需 root）
 
 全局 LC3（常驻游戏态，切换无需重启蓝牙）:
-  on [包名]            开启；省略包名时自动选择已安装的白名单应用
+  on [包名] [--force]  开启；省略包名时自动选择已安装的白名单应用
+                       前置条件未满足时拒绝开启（否则只会降为 SBC），--force 强制
   off                  关闭，切回经典蓝牙
   toggle               切换
   status [--json]      查看状态
@@ -588,6 +776,10 @@ x4lc3 $VERSION — OPPO Enco X4 全局 LC3 管理（需 root）
   restart-bt           重启蓝牙
   （add/del/clear/sync/reset 加 --no-restart 可跳过自动重启蓝牙）
 
+前置条件:
+  coexist [on|off]     双模共存开关 persist.sys.bt.leacoexist（改动会重启蓝牙）
+  pref [on|off]        耳机的双连接偏好（等同欢律游戏模式中的 LC3 低延迟开关）
+
 其他:
   config get | config set <KEY> <VALUE>
                        RESTORE_ON_BOOT=0|1  WATCHDOG=0|1  WATCH_INTERVAL=3-600  ANCHOR=<包名|空>
@@ -595,7 +787,7 @@ x4lc3 $VERSION — OPPO Enco X4 全局 LC3 管理（需 root）
   pkgs                 列出已安装的第三方应用
   log                  查看日志
   diag                 收集诊断信息（保存到 /sdcard/Download）
-  reset                撤销全部改动（关闭 LC3、清空白名单、还原 conf）
+  reset                撤销全部改动（关闭 LC3、还原共存开关/双连接偏好/conf、清空白名单）
 EOF
 }
 
@@ -606,11 +798,12 @@ CMD=$1
 case $CMD in ''|-h|--help|help) usage; exit 0 ;; esac
 [ "$(id -u)" = 0 ] || [ -n "$X4LC3_DATA" ] || die "需要 root 权限"
 
-NO_RESTART=0; JSON=0; ARGS=""
+NO_RESTART=0; JSON=0; FORCE=0; ARGS=""
 for _a in "$@"; do
   case $_a in
     --no-restart) NO_RESTART=1 ;;
     --json) JSON=1 ;;
+    --force) FORCE=1 ;;
     *) ARGS="$ARGS $_a" ;;
   esac
 done
@@ -641,6 +834,8 @@ case $CMD in
   pkgs) pm list packages -3 2>/dev/null | tr -d '\r' | sed 's/^package://' | sort ;;
   log) tail -n 100 "$LOG" 2>/dev/null ;;
   diag) cmd_diag ;;
+  coexist) cmd_coexist "$1" ;;
+  pref) cmd_pref "$1" ;;
   reset) cmd_reset ;;
   early) cmd_early ;;
   boot) cmd_boot ;;

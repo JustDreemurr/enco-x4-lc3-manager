@@ -120,11 +120,13 @@ function render(s) {
   state.textContent = on ? '已开启' : '未开启';
   state.classList.toggle('on', on);
 
-  let device = '未知';
-  if (!s.btOn) device = '蓝牙已关闭';
-  else if (s.leaActive === true) device = 'LE Audio（LC3）';
-  else if (s.leaActive === false) device = '经典蓝牙（A2DP）';
-  $('lea-device').textContent = `活动设备：${device}（据最近事件推断）`;
+  const routes = {
+    le: `LE Audio · ${s.codec || 'LC3'}`,
+    classic: `经典蓝牙 · ${s.codec || 'A2DP'}`,
+    none: '无活动音频设备',
+    off: '蓝牙已关闭',
+  };
+  $('lea-device').textContent = `当前音频：${routes[s.route] || '未知'}`;
 
   const toggle = $('btn-toggle');
   toggle.disabled = false;
@@ -140,12 +142,7 @@ function render(s) {
   if (s.state === 'on' && !on) {
     warnings.appendChild(li('游戏态已被系统改回，LC3 已失效。可重新开启，或打开守护进程'));
   }
-  if (!s.anchor) {
-    warnings.appendChild(li('没有可用的白名单应用：请先在下方添加一个已安装的应用'));
-  }
-  if (s.leacoexist !== 'true') {
-    warnings.appendChild(li(`persist.sys.bt.leacoexist=${s.leacoexist || '空'}：本机蓝牙可能未启用双模共存，全局 LC3 很可能无效。请点“工具 → 收集诊断信息”`));
-  }
+  renderPrereq(s);
 
   const g = s.gamemode;
   $('d-savegame').textContent = g.savegame || '—';
@@ -200,6 +197,62 @@ function render(s) {
   if (c.anchor && !candidates.includes(c.anchor)) candidates.unshift(c.anchor);
   for (const p of new Set(candidates)) sel.appendChild(new Option(p, p));
   sel.value = c.anchor;
+}
+
+// 前置条件清单：每项显示 ✓/✗，未满足时给出修复按钮
+function prereqItem(ok, title, hint, fix) {
+  const el = document.createElement('li');
+  const text = document.createElement('span');
+  const mark = document.createElement('span');
+  mark.className = ok ? 'ok' : 'bad';
+  mark.textContent = ok ? '✓ ' : '✗ ';
+  text.appendChild(mark);
+  text.appendChild(document.createTextNode(title));
+  if (hint) {
+    const small = document.createElement('small');
+    small.textContent = hint;
+    text.appendChild(small);
+  }
+  el.appendChild(text);
+  if (!ok && fix) el.appendChild(fix);
+  return el;
+}
+
+function renderPrereq(s) {
+  const list = $('prereq');
+  list.replaceChildren();
+
+  const coexist = s.leacoexist === 'true';
+  list.appendChild(prereqItem(
+    coexist,
+    '双模共存开关',
+    `persist.sys.bt.leacoexist=${s.leacoexist || '空'}${s.coexistByModule ? '（由本模块开启）' : ''}`,
+    button('开启', 'small', async () => {
+      if (!confirm('将设置 persist.sys.bt.leacoexist=true 并重启蓝牙（耳机会短暂断开）。继续？')) return;
+      await run('正在开启双模共存并重启蓝牙…', 'coexist on');
+    }),
+  ));
+
+  if (!s.prefFeature) {
+    list.appendChild(prereqItem(true, '双连接偏好', '本机未启用该检查'));
+  } else if (!s.dualDevices.length) {
+    list.appendChild(prereqItem(false, '双连接偏好', '未发现支持双模的耳机，请先连接一次 X4'));
+  } else {
+    for (const d of s.dualDevices) {
+      list.appendChild(prereqItem(
+        d.pref === '1',
+        `双连接偏好：${d.label}`,
+        d.pref === '1' ? '' : `当前值 ${d.pref || '空'}。也可在欢律 → 游戏模式中打开 LC3 低延迟`,
+        button('开启', 'small', () => run('正在写入双连接偏好…', 'pref on')),
+      ));
+    }
+  }
+
+  list.appendChild(prereqItem(
+    !!s.anchor,
+    '白名单应用',
+    s.anchor ? `将使用 ${s.anchor}` : '请在下方白名单中添加一个已安装的应用',
+  ));
 }
 
 // ---------- 操作 ----------
@@ -302,7 +355,7 @@ function bind() {
   });
 
   $('btn-reset').addEventListener('click', async () => {
-    if (!confirm('将关闭全局 LC3、清空自定义白名单、还原 conf 并重启蓝牙。确定？')) return;
+    if (!confirm('将关闭全局 LC3，还原由本模块修改的双模共存开关、双连接偏好和 conf，清空自定义白名单，并重启蓝牙。确定？')) return;
     await run('正在撤销全部改动…', 'reset');
   });
 

@@ -22,7 +22,14 @@ if [ -f "$DATA/applied.conf" ] && [ -f "$CONF" ] && cmp -s "$CONF" "$DATA/applie
   CONF_CHANGED=1
 fi
 
-# 2. 读出需要还原的 settings，之后即可删除数据目录
+# 2. 双模共存开关：仅当由本模块开启时还原（setprop 在开机早期即可用）
+if [ -f "$DATA/coexist_orig" ]; then
+  ORIG=$(cat "$DATA/coexist_orig")
+  setprop persist.sys.bt.leacoexist "${ORIG:-false}"
+  CONF_CHANGED=1
+fi
+
+# 3. 读出需要还原的 settings / 双连接偏好，之后即可删除数据目录
 STATE=$(cat "$DATA/state" 2>/dev/null)
 HAS_BACKUP=0
 if [ -f "$DATA/backup" ]; then
@@ -30,6 +37,7 @@ if [ -f "$DATA/backup" ]; then
   SAVEGAME=$(sed -n 's/^savegame=//p' "$DATA/backup")
   LLSTATE=$(sed -n 's/^llstate=//p' "$DATA/backup")
 fi
+PREF_SET=$(cat "$DATA/pref_set" 2>/dev/null)
 rm -rf "$DATA"
 
 restore_one() {
@@ -46,6 +54,10 @@ restore_settings() {
     restore_one debug_gamemode_savegame "$SAVEGAME"
     restore_one oplus_games_low_latency_state "$LLSTATE"
   fi
+  printf '%s\n' "$PREF_SET" | while IFS='=' read -r K V; do
+    [ -n "$K" ] && content call --uri content://com.oplus.appplatform.settings/global \
+      --method PUT_global --arg "$K" --extra "value:s:${V:-0}" >/dev/null 2>&1
+  done
 }
 
 if [ "$(getprop sys.boot_completed)" = 1 ]; then

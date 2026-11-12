@@ -157,6 +157,12 @@ input, select {
 #cfg-interval { width: 90px; }
 #cfg-anchor { max-width: 60%; }
 
+.prereq-title { margin-top: 14px; }
+.prereq { margin-top: 4px; }
+.prereq .ok { color: var(--on); }
+.prereq .bad { color: var(--danger); }
+.prereq small { display: block; color: var(--muted); }
+
 footer { text-align: center; margin-top: 8px; }
 
 .busy {
