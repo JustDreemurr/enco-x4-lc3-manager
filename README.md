@@ -38,6 +38,8 @@
 2. 在 KernelSU / APatch / Magisk 中刷入；
 3. 重启手机。
 
+从 v1.2.1 起，后续版本可以直接在管理器中检查并安装更新。v1.2.0 及更早的版本需要手动刷入一次 v1.2.1 或更新的版本。
+
 ## 首次设置
 
 打开模块的 WebUI，状态卡片下方有**“前置条件”**清单，三项都打勾后才能开启全局 LC3：
@@ -197,8 +199,10 @@ Enco X4 会向手机上报“支持 LE Audio 共存”，系统因此按 **经�
 ## 构建
 
 ```sh
-./build.sh    # 输出 dist/enco_x4_lc3-<version>.zip
+./build.sh    # 输出 dist/enco_x4_lc3-<version>.zip，并更新 update.json
 ```
+
+发布新版本：修改 `module/module.prop` 的 `version` / `versionCode`，在 `CHANGELOG.md` 中补充更新内容，运行 `./build.sh`，提交并推送（含 `update.json`），然后以 `version` 为标签创建 Release 并上传 zip。管理器通过 `module.prop` 中的 `updateJson` 读取 `main` 分支上的 `update.json` 检查更新。
 
 目录结构：
 

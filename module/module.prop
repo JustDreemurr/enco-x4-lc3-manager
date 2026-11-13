@@ -1,6 +1,7 @@
 id=enco_x4_lc3
 name=Enco X4 LC3 Manager
-version=v1.2.0
-versionCode=120
+version=v1.2.1
+versionCode=121
 author=JustDreemurr
 description=一键开关 OPPO Enco X4 全局 LC3（LE Audio），并管理双模 LC3 白名单。
+updateJson=https://raw.githubusercontent.com/JustDreemurr/enco-x4-lc3-manager/main/update.json
