@@ -1,0 +1,68 @@
+# 推送 v* 标签时：校验 → 打包 → 创建 Release → 更新 main 上的 update.json
+# 先发布 Release、再更新 update.json，保证管理器检测到新版本时 zip 已经可以下载。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验标签与 module.prop 版本一致
+        run: |
+          VERSION=$(sed -n 's/^version=//p' module/module.prop)
+          if [ "$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 与 module.prop 中的 version=$VERSION 不一致"
+            exit 1
+          fi
+
+      - name: 语法检查
+        run: |
+          for f in module/*.sh module/system/bin/x4lc3; do sh -n "$f"; done
+          node --check module/webroot/app.js
+
+      - name: 打包
+        run: UPDATE_JSON=1 ./build.sh
+
+      - name: 提取更新日志
+        run: |
+          awk -v v="## $GITHUB_REF_NAME" '$0 == v { f = 1; next } /^## / && f { exit } f' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md 中没有 $GITHUB_REF_NAME 的条目"
+            exit 1
+          fi
+          printf '\n## 安装\n在 KernelSU / APatch / Magisk 中刷入 `enco_x4_lc3-%s.zip` 并重启，或在管理器中直接更新（需已安装 v1.2.1 或更新的版本）。\n' \
+            "$GITHUB_REF_NAME" >> notes.md
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/enco_x4_lc3-$GITHUB_REF_NAME.zip" \
+            --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+
+      - name: 更新 main 上的 update.json
+        run: |
+          cp update.json "$RUNNER_TEMP/update.json"
+          git fetch --no-tags origin main
+          git checkout -B main origin/main
+          cp "$RUNNER_TEMP/update.json" update.json
+          if git diff --quiet -- update.json; then
+            echo "update.json 无变化"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "update.json: $GITHUB_REF_NAME" -- update.json
+          git push origin main

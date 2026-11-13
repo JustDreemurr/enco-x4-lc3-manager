@@ -199,10 +199,19 @@ Enco X4 会向手机上报“支持 LE Audio 共存”，系统因此按 **经�
 ## 构建
 
 ```sh
-./build.sh    # 输出 dist/enco_x4_lc3-<version>.zip，并更新 update.json
+./build.sh    # 输出 dist/enco_x4_lc3-<version>.zip
 ```
 
-发布新版本：修改 `module/module.prop` 的 `version` / `versionCode`，在 `CHANGELOG.md` 中补充更新内容，运行 `./build.sh`，提交并推送（含 `update.json`），然后以 `version` 为标签创建 Release 并上传 zip。管理器通过 `module.prop` 中的 `updateJson` 读取 `main` 分支上的 `update.json` 检查更新。
+### 发布新版本
+
+发布由 GitHub Actions（`.github/workflows/release.yaml`）自动完成：
+
+1. 修改 `module/module.prop` 的 `version`（如 `v1.3.0`）和 `versionCode`（递增）；
+2. 在 `CHANGELOG.md` 顶部添加 `## v1.3.0` 条目，写明更新内容；
+3. 提交并推送到 `main`；
+4. 打标签并推送：`git tag -a v1.3.0 -m v1.3.0 && git push origin v1.3.0`。
+
+工作流会校验标签与 `version` 一致、检查脚本语法、打包、以 `CHANGELOG.md` 中对应条目作为说明创建 Release，**最后**才把新的 `update.json` 提交到 `main`。管理器通过 `module.prop` 中的 `updateJson` 读取它来检查更新，因此不会出现“提示有更新但 zip 还不能下载”的情况。不要手动修改或提交 `update.json`。
 
 目录结构：
 
