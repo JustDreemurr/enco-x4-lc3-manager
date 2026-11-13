@@ -139,8 +139,15 @@ function render(s) {
   if (s.pendingRestart) {
     warnings.appendChild(li('白名单改动尚未生效', button('重启蓝牙', 'small', restartBt)));
   }
-  if (s.state === 'on' && !on) {
-    warnings.appendChild(li('游戏态已被系统改回，LC3 已失效。可重新开启，或打开守护进程'));
+  if (s.state === 'on' && s.paused) {
+    warnings.appendChild(li(
+      `前置条件失效（${s.paused}），已暂停游戏态以免降为 SBC。`
+      + (s.watchdog ? '条件恢复后守护进程会自动重新开启' : '条件恢复后请重新开启全局 LC3'),
+    ));
+  } else if (s.state === 'on' && !on) {
+    warnings.appendChild(li(
+      s.watchdog ? '游戏态已被系统改回，守护进程稍后会自动恢复' : '游戏态已被系统改回，LC3 已失效。可重新开启，或打开守护进程',
+    ));
   }
   renderPrereq(s);
 
@@ -242,7 +249,7 @@ function renderPrereq(s) {
       list.appendChild(prereqItem(
         d.pref === '1',
         `双连接偏好：${d.label}`,
-        d.pref === '1' ? '' : `当前值 ${d.pref || '空'}。也可在欢律 → 游戏模式中打开 LC3 低延迟`,
+        d.pref === '1' ? '' : `当前值 ${d.pref || '空'}。与耳机功能 → 游戏模式中的 LC3 低延迟开关等效`,
         button('开启', 'small', () => run('正在写入双连接偏好…', 'pref on')),
       ));
     }

@@ -26,6 +26,7 @@ BACKUP=$DATA/backup         # 开启前备份的 settings 原值
 BASE=$DATA/base.conf        # 外部（云控/手动）写入的原始 conf，合并时作为基础
 APPLIED=$DATA/applied.conf  # 本模块最近一次写入的 conf
 PENDING=$DATA/pending_restart
+PAUSED=$DATA/paused         # 前置条件失效时游戏态被暂停，内容为原因
 PIDF=$DATA/watchdog.pid
 LOG=$DATA/x4lc3.log
 
@@ -213,7 +214,7 @@ restart_bt() {
   svc bluetooth enable
   wait_bt 1 || say "警告: 等待蓝牙开启超时"
   rm -f "$PENDING"
-  if [ "$(state_get)" = on ] && [ -s "$ACTIVE" ]; then
+  if [ "$(state_get)" = on ] && [ -s "$ACTIVE" ] && [ ! -f "$PAUSED" ]; then
     sleep 3
     apply_gamemode "$(cat "$ACTIVE")"
   fi
@@ -270,6 +271,37 @@ pick_anchor() {
   return 1
 }
 
+# 前置条件失效时（如耳机重连后上报“低延迟关闭”，双连接偏好被改回 0），系统会断开 LE Audio，
+# 此时保持游戏态只会触发经典 A2DP 低延迟、耳机降为 SBC。因此保留 state=on，只把游戏态置 0。
+pause_gamemode() { # $1 = 原因
+  [ -f "$PAUSED" ] && return 0
+  sput debug_gamemode_value 0
+  echo "$1" > "$PAUSED"
+  log "前置条件失效（$1），已暂停游戏态以免降为 SBC"
+}
+
+# LE Audio 是否已连接（ActiveDeviceManager 段 LE Audio 的 Connected count > 0）
+le_connected() {
+  load_bt_dump
+  _c=$(awk '
+    /^BluetoothActiveDeviceManager$/ { inadm = 1; next }
+    inadm && /event log/ { exit }
+    inadm && /^  [^ ].*:$/ { cur = $0; next }
+    inadm && cur == "  LE Audio:" && /Connected count:/ { print $NF; exit }' "$BTDUMP")
+  rm -f "$BTDUMP"
+  [ "${_c:-0}" -gt 0 ] 2>/dev/null
+}
+
+# 前置条件恢复后重新开启游戏态。先等 LE Audio 连上（最多约 20 秒）再触发：
+# 实测游戏态先于 LE 连接生效时，LE 连上后不会自动成为活动设备，需要重新触发一次。
+resume_gamemode() {
+  _i=0
+  while [ $_i -lt 10 ] && ! le_connected; do sleep 2; _i=$((_i + 1)); done
+  rm -f "$PAUSED"
+  apply_gamemode "$(cat "$ACTIVE")"
+  log "前置条件已恢复，重新开启游戏态"
+}
+
 effective_on() { [ "$(state_get)" = on ] && [ "$(sget debug_gamemode_value)" = 1 ]; }
 
 cmd_on() {
@@ -298,6 +330,7 @@ $(printf '%s\n' "$_probs" | sed 's/^/  - /')
     fi
   fi
   backup_settings
+  rm -f "$PAUSED"
   apply_gamemode "$_pkg"
   echo on > "$STATE"
   echo "$_pkg" > "$ACTIVE"
@@ -310,7 +343,7 @@ cmd_off() {
   sput debug_gamemode_value 0
   restore_settings
   echo off > "$STATE"
-  rm -f "$ACTIVE"
+  rm -f "$ACTIVE" "$PAUSED"
   say "已关闭全局 LC3，切回经典蓝牙（LHDC/AAC）"
 }
 
@@ -342,12 +375,28 @@ watchdog_stop() {
 wd_loop() {
   echo $$ > "$PIDF"
   log "守护进程启动 (pid $$)"
+  _lastpref=""
   while [ "$(cfg_get WATCHDOG 0)" = 1 ]; do
+    if pref_feature_on; then
+      _pv=""
+      for _m in $(dual_macs); do _pv="$_pv$(pref_get_key "$(pref_key "$_m")") "; done
+      if [ -n "$_lastpref" ] && [ "$_pv" != "$_lastpref" ]; then
+        log "守护: 双连接偏好变化 ${_lastpref% } → ${_pv% }"
+      fi
+      _lastpref=$_pv
+    fi
     if [ "$(state_get)" = on ] && [ -s "$ACTIVE" ]; then
-      _v=$(sget debug_gamemode_value)
-      if [ "$_v" != 1 ]; then
-        apply_gamemode "$(cat "$ACTIVE")"
-        log "守护: debug_gamemode_value 被改为 $_v，已恢复游戏态"
+      _probs=$(prereq_problems)
+      if [ -n "$_probs" ]; then
+        [ -f "$PAUSED" ] || pause_gamemode "$(printf '%s\n' "$_probs" | head -n 1)"
+      elif [ -f "$PAUSED" ]; then
+        resume_gamemode
+      else
+        _v=$(sget debug_gamemode_value)
+        if [ "$_v" != 1 ]; then
+          apply_gamemode "$(cat "$ACTIVE")"
+          log "守护: debug_gamemode_value 被改为 $_v，已恢复游戏态"
+        fi
       fi
     fi
     if conf_drifted; then
@@ -438,6 +487,7 @@ cmd_status_json() {
 
   printf '"anchor":%s,"activePkg":%s,' "$(jstr "$_anchor")" "$(jstr "$(cat "$ACTIVE" 2>/dev/null)")"
   printf '"pendingRestart":%s,"watchdog":%s,' "$(jbool test -f "$PENDING")" "$(jbool wd_running)"
+  printf '"paused":%s,' "$(jstr "$(cat "$PAUSED" 2>/dev/null)")"
   printf '"config":{"restoreOnBoot":%s,"watchdog":%s,"watchInterval":%s,"anchor":%s},' \
     "$(jstr "$(cfg_get RESTORE_ON_BOOT 1)")" "$(jstr "$(cfg_get WATCHDOG 0)")" \
     "$(jstr "$(cfg_get WATCH_INTERVAL 10)")" "$(jstr "$(cfg_get ANCHOR "")")"
@@ -487,6 +537,7 @@ cmd_status() {
   _probs=$(prereq_problems)
   [ -n "$_probs" ] && printf '前置条件未满足:\n%s\n' "$(printf '%s\n' "$_probs" | sed 's/^/  - /')"
   [ -f "$PENDING" ] && echo "白名单改动待重启蓝牙后生效"
+  [ -f "$PAUSED" ] && echo "游戏态已暂停（避免降为 SBC）: $(cat "$PAUSED")"
   wd_running && echo "守护进程: 运行中" || echo "守护进程: 未运行"
   if [ -n "$_ev" ]; then
     echo "最近的活动设备切换:"
@@ -500,7 +551,8 @@ cmd_status() {
 #    蓝牙进程启动时读一次。一加 13（PJZ110）等机型默认未设置 → 双模功能关闭。
 # 2. oplus_lea_dual_connection_preference_<sha256(MAC)>：存于 OPLUS 设置库
 #    content://com.oplus.appplatform.settings/global，isDualConnectionNeeded() 要求为 1。
-#    通常由欢律 App 游戏模式的 LC3 低延迟开关经耳机回传写入；蓝牙进程监听该键，改动即时生效。
+#    与耳机功能（com.oplus.melody）游戏模式中的“LC3 低延迟”开关等效，两边同步（一加 13 实测）。
+#    蓝牙进程监听该键，改动即时生效。部分机型上耳机重连后该键会被改回 0，原因待查（见 issue #1）。
 #    属性 persist.sys.oplus.dual_connection_preference_enabled=false 时不检查此项。
 
 COEXIST_PROP=persist.sys.bt.leacoexist
@@ -513,8 +565,8 @@ coexist_on() { [ "$(getprop $COEXIST_PROP)" = true ]; }
 pref_feature_on() { [ "$(getprop persist.sys.oplus.dual_connection_preference_enabled)" != false ]; }
 
 # 被系统判为支持双模（耳机上报共存特性位，如 X4）的设备 MAC
-DUAL_XML_PATHS="/data/user_de/0/com.android.bluetooth/shared_prefs/dual_mode_support.xml
-/data/user_de/0/com.google.android.bluetooth/shared_prefs/dual_mode_support.xml"
+DUAL_XML_PATHS="${X4LC3_DUAL_XML:-/data/user_de/0/com.android.bluetooth/shared_prefs/dual_mode_support.xml
+/data/user_de/0/com.google.android.bluetooth/shared_prefs/dual_mode_support.xml}"
 dual_xml() { for _x in $DUAL_XML_PATHS; do [ -f "$_x" ] && cat "$_x"; done; }
 
 dual_macs() {
@@ -548,7 +600,7 @@ prereq_problems() {
   for _m in $_macs; do
     [ "$(pref_get_key "$(pref_key "$_m")")" = 1 ] && return 0
   done
-  echo "耳机的双连接偏好未开启（欢律 → 游戏模式 → LC3 低延迟）"
+  echo "耳机的双连接偏好未开启"
 }
 
 cmd_coexist() {
@@ -648,14 +700,23 @@ cmd_diag() {
     echo; echo "== $CONF"; cat "$CONF" 2>/dev/null || echo "（不存在）"
     echo; echo "== dual_mode_support.xml"
     _dx=$(dual_xml); echo "${_dx:-（不存在）}"
-    echo; echo "== PeerSmartAudioFeature（X4 应为 56318 / 0xDBFE）"
-    grep -E '^\[|PeerSmartAudioFeature' /data/misc/bluedroid/bt_remote_dev_info.conf 2>/dev/null | grep -B1 PeerSmartAudioFeature
+    echo; echo "== PeerSmartAudioFeature（bit14 = 0x4000 置位即支持 LE Audio 共存，具体数值因固件而异）"
+    grep -E '^\[|^PeerSmartAudioFeature *=' /data/misc/bluedroid/bt_remote_dev_info.conf 2>/dev/null |
+      grep -B1 PeerSmartAudioFeature | while IFS= read -r _l; do
+        case $_l in
+          PeerSmartAudioFeature*)
+            _n=$(echo "$_l" | sed 's/[^0-9]//g')
+            if [ -n "$_n" ] && [ $((_n & 16384)) -ne 0 ]; then _c=支持共存; else _c=不支持共存; fi
+            echo "$_l（$_c）" ;;
+          *) echo "$_l" ;;
+        esac
+      done
     echo; echo "== bt_config.conf（名称 / LE Audio 相关）"
     grep -iE '^\[|^Name|LeAudio|Lc3|DevType' /data/misc/bluedroid/bt_config.conf 2>/dev/null | grep -iE -B2 'enco|LeAudio|Lc3' | head -n 60
     echo; echo "== dumpsys bluetooth_manager（编码 / LE Audio）"
     dumpsys bluetooth_manager 2>/dev/null | tr -d '\000\r' | grep -iE 'codec|LeAudio|LE_AUDIO|DualMode|DualConnection|Active Device' | head -n 80
     echo; echo "== logcat"
-    logcat -d -b all 2>/dev/null | grep -iE 'OplusDualMode|isDualConnection|oplusHandleLea|BluetoothLowLatency|leacoexist|SmartAudioFeature|GameSpaceMode' | tail -n 80
+    logcat -d -b all 2>/dev/null | grep -iE 'OplusDualMode|DualConnectionPreference|EarbudsGameLowLatency|isDualConnection|oplusHandleLea|BluetoothLowLatency|leacoexist|SmartAudioFeature|GameSpaceMode|LE_AUDIO connection state' | tail -n 150
     echo; echo "== 模块日志"; tail -n 50 "$LOG" 2>/dev/null
   } 2>&1 | mask_mac > "$_out"
   cat "$_out"
@@ -744,7 +805,11 @@ cmd_boot() {
   log "开机恢复开始"
   conf_sync && after_conf_change 0 >/dev/null
   if [ "$(state_get)" = on ]; then
-    if [ "$(cfg_get RESTORE_ON_BOOT 1)" = 1 ]; then
+    rm -f "$PAUSED"
+    _probs=$(prereq_problems)
+    if [ "$(cfg_get RESTORE_ON_BOOT 1)" = 1 ] && [ -n "$_probs" ]; then
+      pause_gamemode "$(printf '%s\n' "$_probs" | head -n 1)"
+    elif [ "$(cfg_get RESTORE_ON_BOOT 1)" = 1 ]; then
       _p=$(cat "$ACTIVE" 2>/dev/null)
       # 子 shell：cmd_on 失败时 die 不会中断后续的守护进程启动
       if [ -n "$_p" ] && installed "$_p"; then (cmd_on "$_p") >/dev/null; else (cmd_on) >/dev/null; fi
@@ -778,7 +843,7 @@ x4lc3 $VERSION — OPPO Enco X4 全局 LC3 管理（需 root）
 
 前置条件:
   coexist [on|off]     双模共存开关 persist.sys.bt.leacoexist（改动会重启蓝牙）
-  pref [on|off]        耳机的双连接偏好（等同欢律游戏模式中的 LC3 低延迟开关）
+  pref [on|off]        耳机的双连接偏好（与耳机功能 → 游戏模式中的 LC3 低延迟开关等效）
 
 其他:
   config get | config set <KEY> <VALUE>
