@@ -48,11 +48,15 @@ final class Prerequisites {
         }
 
         boolean lowLatency = requirements.flag("lowLatency");
-        checks.add(lowLatency
-                ? new Check(Group.PREREQUISITES, Level.OK, context.getString(R.string.req_whitelist),
-                        appLabels(context, requirements.apps()), null, null)
-                : check(context, Level.FAIL, R.string.req_whitelist, R.string.req_whitelist_none,
-                        R.string.req_whitelist_hint, Fix.INSTALL_APP));
+        if (lowLatency) {
+            checks.add(new Check(Group.PREREQUISITES, Level.OK, context.getString(R.string.req_whitelist),
+                    appLabels(context, requirements.apps()), null, null));
+        } else if (requirements.flag("whitelistBypass")) {
+            checks.add(check(context, Level.OK, R.string.req_whitelist, R.string.req_whitelist_bypassed, 0, null));
+        } else {
+            checks.add(check(context, Level.FAIL, R.string.req_whitelist, R.string.req_whitelist_none,
+                    R.string.req_whitelist_hint, Fix.INSTALL_APP));
+        }
         if (!"found".equals(requirements.module().get("device"))) {
             checks.add(check(context, Level.FAIL, R.string.diag_x4, R.string.req_device_none,
                     R.string.req_device_hint, Fix.BLUETOOTH_SETTINGS));

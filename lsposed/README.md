@@ -1,10 +1,12 @@
 # Encore 实现说明
 
-使用说明见仓库根目录的 [README](../README.md)。本文记录 Encore（包名 `io.github.justdreemurr.encore`）的实现细节、一加 13 实测数据和开发验证步骤。模块仅适配固件 `PJZ110_17.0.0.103(CN01)`，双模连接偏好、白名单、省电和多设备占用等条件仍由系统检查。
+使用说明见仓库根目录的 [README](../README.md)。本文记录 Encore（包名 `io.github.justdreemurr.encore`）的实现细节、一加 13 实测数据和开发验证步骤。模块仅适配固件 `PJZ110_17.0.0.103(CN01)`，双模连接偏好、省电和多设备占用等条件仍由系统检查。双模白名单在路由接管开启时由模块放行，生效时转储出现 `Encore whitelist: Passed the dual-mode whitelist check for X4`。
 
 ## 路由与低延迟
 
 模块通过 `ActiveDeviceManager` 调用 `LeAudioService.setActiveDevice()`，与 ColorOS 游戏低延迟路径共用 LE Audio 激活入口。系统蓝牙游戏态退出后，模块会在普通音频模式下为 X4 请求 LE Audio。
+
+退出白名单游戏时，模块让 `LowLatencyState.processExitLowLatency` 跳过撤下 LE Audio 和恢复经典蓝牙的分支，编码配置仍由系统恢复，生效时转储出现 `Encore event: Kept X4 on LE Audio while leaving game low latency`。一加 13 实测退出后 X4 始终是活动 LE Audio 设备，配置场景回到 `MEDIA`。
 
 在 Encore 中启用 `Game_Vnd` 后，模块会在 X4 重连时调用固件的 WALT 入口，请求高通低延迟配置。手机侧使用 `setGameMode(false, true)`，X4 的经典蓝牙连接就绪后，模块通过系统 Smart Audio 接口向这副耳机发送 WALT 通知。关闭开关或 X4 失去路由时，模块会请求恢复两端状态。关闭开关并重连可重新协商普通 LE Audio。ColorOS 全局游戏态、`GCP_TX` 和 `AudioGameMode` 由系统控制。
 

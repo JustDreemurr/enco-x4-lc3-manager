@@ -8,6 +8,7 @@ import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Message;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
@@ -31,7 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class EncoreModule extends XposedModule {
     private static final String TAG = "Encore";
-    private static final String VERSION = "0.7.1";
+    private static final String VERSION = "0.7.2";
     private static final int EVENT_LIMIT = 80;
     private static final String BLUETOOTH_PACKAGE = RouteSettings.BLUETOOTH_PACKAGE;
     private static final String TARGET_BUILD = RouteSettings.SUPPORTED_FIRMWARE;
@@ -40,11 +41,14 @@ public final class EncoreModule extends XposedModule {
             "com.oplus.bluetooth.feature.lowlatency.BluetoothLowLatencyStateMachine";
     private static final String WEAR_CHECK = "com.oplus.bluetooth.feature.wearcheck.OplusBluetoothWearCheck";
     private static final String LOW_LATENCY_SERVICE = "com.oplus.bluetooth.feature.lowlatency.BluetoothLowLatencyService";
+    private static final String DUAL_MODE_MANAGER = "com.oplus.bluetooth.btservice.OplusDualModeManagerImpl";
     private static final long ROUTE_SETTLE_MS = 250;
     private static final long VERIFY_DELAY_MS = 1500;
     private static final long STARTUP_FALLBACK_WINDOW_MS = 3000;
     private static final long HFP_RETRY_WINDOW_MS = 8000;
     private static final long DIRECT_ROUTE_WAIT_MS = 5000;
+    private static final long LOW_LATENCY_EXIT_SETTLE_MS = 2000;
+    private static final long GAME_EXIT_KEEP_LE_MS = 3000;
     private static final long WALT_PREPARE_TIMEOUT_MS = 12000;
     private static final int USER_DISCONNECT_REASON = 1111;
     private static final long RECONNECT_POLL_MS = 400;
@@ -87,6 +91,8 @@ public final class EncoreModule extends XposedModule {
                             Object adm = chain.getThisObject();
                             Object result = chain.proceed();
                             route.installWearCheckHooks(adm);
+                            route.installWhitelistHooks(adm);
+                            route.installGameExitHook(adm);
                             route.schedule(adm);
                             return result;
                         }));
@@ -288,6 +294,10 @@ public final class EncoreModule extends XposedModule {
         private final ThreadLocal<Boolean> wearKeepsLe = new ThreadLocal<>();
         private volatile boolean wearHooksInstalled;
         private volatile String wearDecision = "Waiting for wear check";
+        private final ThreadLocal<Boolean> checkingX4DualConnection = new ThreadLocal<>();
+        private final ThreadLocal<Boolean> whitelistAppsChanged = new ThreadLocal<>();
+        private volatile boolean whitelistHooksInstalled;
+        private volatile String whitelistDecision = "Waiting for dual-mode check";
         private final Object queueLock = new Object();
         private Handler queuedHandler;
         private Handler routeHandler;
@@ -310,6 +320,9 @@ public final class EncoreModule extends XposedModule {
         private volatile String directResult;
         private volatile String lastFailure;
         private volatile int lastRequestedGroup = INVALID_GROUP;
+        private volatile long lowLatencyExitAt;
+        private volatile long gameExitKeepLeUntil;
+        private volatile boolean gameExitHookInstalled;
         private volatile String lastDecision;
         private volatile String lastRequest;
         private volatile String lastRemoval;
@@ -401,6 +414,7 @@ public final class EncoreModule extends XposedModule {
                     + "\n  Encore verification: " + lastVerification
                     + "\n  Encore scene: " + sceneDecision
                     + "\n  Encore wear: " + wearDecision
+                    + "\n  Encore whitelist: " + whitelistDecision
                     + "\n  Encore reconnect: " + reconnectStatus;
         }
 
@@ -425,7 +439,8 @@ public final class EncoreModule extends XposedModule {
                 StringBuilder out = new StringBuilder("state=ok")
                         .append(" feature=").append(bindings.featureEnabled.getBoolean(dual))
                         .append(" powerSave=").append(bindings.powerSave.getBoolean(dual))
-                        .append(" lowLatency=").append(lowLatency);
+                        .append(" lowLatency=").append(lowLatency)
+                        .append(" whitelistBypass=").append(whitelistHooksInstalled && routingEnabled());
                 BluetoothDevice x4 = null;
                 for (Object item : (Set<?>) bondedDevices.invoke(adapterService)) {
                     if (item instanceof BluetoothDevice device && TARGET_NAME.equals(device.getName())
@@ -574,6 +589,151 @@ public final class EncoreModule extends XposedModule {
             } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
                 wearDecision = "Wear check bindings unavailable";
                 report(Log.WARN, wearDecision, error);
+            }
+        }
+
+        /**
+         * ColorOS keeps the LE Audio connection of dual-mode earbuds only while an app from its dual-mode whitelist
+         * is installed (OplusDualModeManagerImpl.isDualConnectionNeeded → hasLowLatencyPackage). While X4 routing is
+         * enabled, answer that one condition as met when the firmware evaluates X4, so no whitelist app is needed.
+         * The other conditions, and every other headset, keep the firmware's own answer.
+         * When the last whitelist app is removed, onLowLatencyPackageChanged disconnects LE Audio from every
+         * dual-mode headset without asking isDualConnectionNeeded; that disconnect is skipped for X4 only.
+         */
+        synchronized void installWhitelistHooks(Object adm) {
+            if (whitelistHooksInstalled) {
+                return;
+            }
+            try {
+                Object extension = admExtension.get(adm);
+                if (extension == null) {
+                    return;
+                }
+                ClassLoader loader = extension.getClass().getClassLoader();
+                Class<?> dualMode = load(loader, DUAL_MODE_MANAGER);
+                Method needed = method(dualMode, "isDualConnectionNeeded", BluetoothDevice.class);
+                Method installedApp = method(dualMode, "hasLowLatencyPackage");
+                Method appsChanged = method(dualMode, "onLowLatencyPackageChanged", boolean.class, boolean.class);
+                Method leDisconnect = method(load(loader, "com.android.bluetooth.le_audio.LeAudioService"),
+                        "disconnect", BluetoothDevice.class);
+                hook(needed).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                    BluetoothDevice device = (BluetoothDevice) chain.getArg(0);
+                    if (device == null || !routingEnabled() || !TARGET_NAME.equals(device.getName())) {
+                        return chain.proceed();
+                    }
+                    checkingX4DualConnection.set(true);
+                    try {
+                        return chain.proceed();
+                    } finally {
+                        checkingX4DualConnection.remove();
+                    }
+                });
+                hook(installedApp).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                    Object result = chain.proceed();
+                    if (Boolean.TRUE.equals(checkingX4DualConnection.get()) && !Boolean.TRUE.equals(result)) {
+                        noteWhitelistDecision("Passed the dual-mode whitelist check for X4");
+                        return true;
+                    }
+                    return result;
+                });
+                hook(appsChanged).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                    if (!routingEnabled()) {
+                        return chain.proceed();
+                    }
+                    whitelistAppsChanged.set(true);
+                    try {
+                        return chain.proceed();
+                    } finally {
+                        whitelistAppsChanged.remove();
+                    }
+                });
+                hook(leDisconnect).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                    BluetoothDevice device = (BluetoothDevice) chain.getArg(0);
+                    if (Boolean.TRUE.equals(whitelistAppsChanged.get()) && device != null
+                            && TARGET_NAME.equals(device.getName())) {
+                        noteWhitelistDecision("Kept X4 LE Audio after the last whitelist app was removed");
+                        return false;
+                    }
+                    return chain.proceed();
+                });
+                deoptimize(needed);
+                deoptimize(appsChanged);
+                whitelistHooksInstalled = true;
+                whitelistDecision = "Watching dual-mode whitelist check";
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                whitelistDecision = "Dual-mode whitelist bindings unavailable";
+                report(Log.WARN, whitelistDecision, error);
+            }
+        }
+
+        /**
+         * Leaving a whitelist game, ColorOS's LowLatencyState.processExitLowLatency restores the codec settings and,
+         * while LE Audio is active, removes the LE Audio device and waits in ExitingLowLatencyState to restore classic
+         * audio, which drops X4 to LHDC. For X4 with routing enabled, run it as if LE Audio were inactive: the codec
+         * settings are still restored and the machine goes straight back to NormalState, whose own attempt to drop
+         * LE Audio shortly after is refused by keepLeThroughGameExit.
+         */
+        synchronized void installGameExitHook(Object adm) {
+            if (gameExitHookInstalled) {
+                return;
+            }
+            try {
+                Object extension = admExtension.get(adm);
+                if (extension == null) {
+                    return;
+                }
+                ClassLoader loader = extension.getClass().getClassLoader();
+                Class<?> machine = load(loader, LOW_LATENCY_STATE_MACHINE);
+                Class<?> lowLatencyState = load(loader, LOW_LATENCY_STATE_MACHINE + "$LowLatencyState");
+                Method exit = method(lowLatencyState, "processExitLowLatency");
+                Method processMessage = method(lowLatencyState, "processMessage", Message.class);
+                Field outer = field(lowLatencyState, "this$0");
+                Field leAudioActive = field(machine, "mIsLEAudioActive");
+                Field lowLatencyDevice = field(machine, "mDevice");
+                hook(exit).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                    Object stateMachine = outer.get(chain.getThisObject());
+                    BluetoothDevice device = (BluetoothDevice) lowLatencyDevice.get(stateMachine);
+                    if (!routingEnabled() || !x4LeActive || device == null || !TARGET_NAME.equals(device.getName())
+                            || !leAudioActive.getBoolean(stateMachine)) {
+                        return chain.proceed();
+                    }
+                    gameExitKeepLeUntil = SystemClock.elapsedRealtime() + GAME_EXIT_KEEP_LE_MS;
+                    leAudioActive.setBoolean(stateMachine, false);
+                    try {
+                        return chain.proceed();
+                    } finally {
+                        leAudioActive.setBoolean(stateMachine, true);
+                        report(Log.INFO, "Kept X4 on LE Audio while leaving game low latency");
+                    }
+                });
+                deoptimize(processMessage);
+                gameExitHookInstalled = true;
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                report(Log.WARN, "Game low latency exit bindings unavailable", error);
+            }
+        }
+
+        /** Refuses the low latency state machine's LE Audio removal for X4 right after leaving game low latency. */
+        private boolean keepLeThroughGameExit() {
+            if (!x4LeActive || SystemClock.elapsedRealtime() > gameExitKeepLeUntil) {
+                return false;
+            }
+            for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
+                if (frame.getClassName().startsWith(LOW_LATENCY_STATE_MACHINE)) {
+                    lastRemoval = "Kept X4 on LE Audio after game low latency exit <- " + frame.getClassName() + "."
+                            + frame.getMethodName();
+                    report(Log.INFO, lastRemoval);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** The firmware checks dual connection often; report only when the decision changes. */
+        private void noteWhitelistDecision(String decision) {
+            if (!decision.equals(whitelistDecision)) {
+                whitelistDecision = decision;
+                report(Log.INFO, decision);
             }
         }
 
@@ -1071,6 +1231,9 @@ public final class EncoreModule extends XposedModule {
             if (!routingEnabled()) {
                 return false;
             }
+            if (allowStartupProtection && keepLeThroughGameExit()) {
+                return true;
+            }
             try {
                 int group = lastRequestedGroup;
                 if (group == INVALID_GROUP || (int) leActiveGroup.invoke(le) != group) {
@@ -1081,6 +1244,7 @@ public final class EncoreModule extends XposedModule {
                 boolean fromModeChange = false;
                 boolean fromVendorLeSelection = false;
                 boolean fromHfpSetup = false;
+                boolean fromLowLatencyExit = false;
                 StringBuilder caller = new StringBuilder("Group " + group + " deactivation");
                 for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
                     String owner = frame.getClassName();
@@ -1096,6 +1260,8 @@ public final class EncoreModule extends XposedModule {
                             && name.equals("setActiveDeviceForLea");
                     fromHfpSetup |= owner.equals("com.android.bluetooth.btservice.ActiveDeviceManager")
                             && (name.equals("handleHfpConnected") || name.equals("handleHfpActiveDeviceChanged"));
+                    fromLowLatencyExit |= owner.equals(LOW_LATENCY_STATE_MACHINE + "$LowLatencyState")
+                            && name.equals("processExitLowLatency");
                 }
                 boolean eligible = request != null && request.le() == le && request.group() == group
                         && pendingRoute.get() == request && canKeepRoute(request);
@@ -1109,6 +1275,11 @@ public final class EncoreModule extends XposedModule {
                 lastRemoval = (suppressed ? "Suppressed startup fallback: " : "Allowed: ") + caller;
                 if (!suppressed) {
                     clearGameVnd();
+                }
+                if (!suppressed && fromLowLatencyExit) {
+                    lowLatencyExitAt = SystemClock.elapsedRealtime();
+                    lastRequestedGroup = INVALID_GROUP;
+                    lastRemoval = "Will route X4 back to LE Audio after game low latency exit. " + lastRemoval;
                 }
                 report(Log.INFO, lastRemoval);
                 return suppressed;
@@ -1208,6 +1379,12 @@ public final class EncoreModule extends XposedModule {
                     return;
                 }
                 int groupId = (int) leGroup.invoke(le, lead);
+                long exitSettling = lowLatencyExitAt + LOW_LATENCY_EXIT_SETTLE_MS - SystemClock.elapsedRealtime();
+                if (lowLatencyExitAt != 0 && exitSettling > 0) {
+                    decision("Waiting for game low latency exit to settle");
+                    Handler.createAsync(currentHandler.getLooper()).postDelayed(() -> schedule(adm), exitSettling);
+                    return;
+                }
                 boolean recoveringHfpFallback = retry != null && retry.le() == le
                         && retry.group() == groupId && retry.classic().equals(classic);
                 if (groupId == lastRequestedGroup && !recoveringHfpFallback) {
@@ -1440,7 +1617,7 @@ public final class EncoreModule extends XposedModule {
         final Method occupied;
 
         VendorBindings(ClassLoader loader) throws ReflectiveOperationException {
-            Class<?> dual = RouteHooks.load(loader, "com.oplus.bluetooth.btservice.OplusDualModeManagerImpl");
+            Class<?> dual = RouteHooks.load(loader, DUAL_MODE_MANAGER);
             Class<?> adm = RouteHooks.load(loader, "com.oplus.bluetooth.btservice.OplusActiveDeviceManagerExtImpl");
             wiredOutput = RouteHooks.field(adm, "mOplusHasAddedWiredDevice");
             dualInstance = RouteHooks.field(dual, "sInstance");

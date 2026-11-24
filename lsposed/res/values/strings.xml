@@ -152,7 +152,8 @@
     <string name="req_whitelist">双模白名单应用</string>
     <string name="req_whitelist_none">未安装，系统不会为 X4 建立 LE Audio 连接</string>
     <string name="req_whitelist_present">已安装</string>
-    <string name="req_whitelist_hint">安装 Superpowered Latency Test 或任一系统白名单游戏即可，无需启动</string>
+    <string name="req_whitelist_bypassed">由 Encore 放行，无需安装</string>
+    <string name="req_whitelist_hint">开启「X4 路由接管」后由 Encore 放行，也可安装 Superpowered Latency Test 或任一系统白名单游戏</string>
     <string name="req_device_none">未配对</string>
     <string name="req_device_hint">在系统蓝牙中配对并连接一次 X4</string>
     <string name="req_dual_support">耳机双模识别</string>

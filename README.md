@@ -30,6 +30,7 @@ ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游�
 - 拦截 ColorOS 低延迟状态机对 X4 LE Audio 的自动撤销
 - 连接时直接走 LE Audio，省去「先 LHDC、再切 LC3」的短暂切换
 - 摘下再戴回、自动恢复播放时保持 LE Audio，避免被切回 LHDC
+- 进出系统白名单游戏时保持 LE Audio，退出游戏不会切回 LHDC
 - 一键重连 X4、重启作用域，改完设置不用进系统蓝牙页
 
 ### 📊 实时链路
@@ -70,7 +71,8 @@ ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游�
   </tr>
 </table>
 
-- 逐项检查双模共存、省电模式、双模白名单应用、X4 双连接偏好、通话与媒体音频和双耳 LE Audio 连接
+- 逐项检查双模共存、省电模式、X4 双连接偏好、通话与媒体音频和双耳 LE Audio 连接
+- 无需安装双模白名单应用，Encore 在系统判断 X4 时直接放行这一项
 - 条件不满足时主页会提示，诊断页提供对应的修复入口
 - 一键导出诊断日志，蓝牙地址和设备专属偏好键会自动脱敏
 
@@ -106,7 +108,7 @@ ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游�
 | --- | --- |
 | 双模共存 `persist.sys.bt.leacoexist=true` | 在诊断页点「开启并重启蓝牙」 |
 | X4 的双连接偏好 | 在诊断页点「开启」，也可在耳机设置的「游戏模式」中打开 LC3 低延迟 |
-| 双模白名单应用 | 安装 Superpowered Latency Test 或任一 ColorOS 双模白名单应用。只需安装，无需启动 |
+| 双模白名单应用 | 「X4 路由接管」开启时由 Encore 放行，无需安装。关闭路由接管后，需要安装 Superpowered Latency Test 或任一 ColorOS 双模白名单应用 |
 | 省电模式 | 在诊断页进入「省电设置」并关闭省电 |
 | 通话与媒体音频 | 在系统蓝牙里打开 X4 的「通话音频」和「媒体音频」 |
 
@@ -182,6 +184,8 @@ ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游�
 
 ColorOS 的佩戴检测在耳机戴上时会重新选择活动设备；耳机戴回后自动恢复播放，也会经 AVRCP 把 X4 设为 A2DP 设备。系统只在游戏低延迟状态下才拦住这些切换，X4 因此回到 LHDC。从 0.6.3 起，路由接管开启且 X4 正在走 LE Audio 时，Encore 拒绝把 X4 设为 A2DP 设备。仍然回落时，诊断页的「Enco X4」会显示 A2DP，点「重连 Enco X4」可恢复，反馈时请附上导出的日志。
 
+退出系统白名单游戏时，ColorOS 会退出游戏低延迟并把 X4 切回 LHDC。从 0.7.2 起，X4 在退出游戏时直接保持 LE Audio，系统仍照常恢复非游戏状态的编码配置。
+
 **开启 Game_Vnd 后有电音或断续**
 
 Game_Vnd 把重传次数从 5 降到 3，信号差时更容易丢包。关闭后重连 X4。
@@ -198,6 +202,8 @@ Game_Vnd 把重传次数从 5 降到 3，信号差时更容易丢包。关闭后
 
 - **路由**：X4 的 LE Audio 组可串流后，模块通过 `ActiveDeviceManager` 调用 `LeAudioService.setActiveDevice()`，与 ColorOS 游戏低延迟路径共用同一个激活入口。请求后 3 秒内，最多拦截一次低延迟状态机对 X4 组的自动撤销。重连时如果当前没有活动输出，模块把 X4 的 A2DP 激活延后最多 5 秒，等 LE Audio 就绪后直接激活。
 - **佩戴检测**：X4 戴上时，ColorOS 佩戴检测（`OplusBluetoothWearCheck.processHeadsetStatusChanged`）只在 `isUltraGameMode()` 为真时选择 LE Audio，否则把 X4 设为 HFP 和 A2DP 设备。路由接管开启时，模块只对这一次判断返回真，耳机的 SCO / CIS 被占用时系统仍会跳过 LE Audio。
+- **双模白名单**：ColorOS 在 `OplusDualModeManagerImpl.isDualConnectionNeeded()` 中要求手机上至少装有一个双模白名单应用（`hasLowLatencyPackage()`），否则不为双模耳机保持 LE Audio 连接。路由接管开启时，模块只在系统判断 X4 的这一次调用里放行白名单这一项，通话与媒体音频、双模识别、双连接偏好和省电等条件仍由系统检查，其他耳机不受影响。卸载最后一个白名单应用时，系统会在 `onLowLatencyPackageChanged` 中直接断开所有双模耳机的 LE Audio，模块只跳过对 X4 的这次断开。
+- **退出游戏低延迟**：`BluetoothLowLatencyStateMachine$LowLatencyState.processExitLowLatency` 先恢复编码配置，再在 LE Audio 活动时撤下 LE Audio 设备，并进入 `ExitingLowLatencyState` 恢复经典蓝牙。X4 是活动 LE Audio 设备时，模块让这次调用按「LE Audio 未激活」执行：编码配置照常恢复，状态机直接回到正常状态。之后 3 秒内，低延迟状态机对 X4 的 LE Audio 撤销会被拦下。如果 X4 仍被撤下，模块等系统处理完退出流程约 2 秒后，再重新请求 LE Audio。
 - **A2DP 激活**：ColorOS 在游戏低延迟状态下会拒绝为需要双连接的耳机激活 A2DP（`OplusA2dpServiceExtImpl.oplusSetActiveBefore`）。Encore 不开游戏态，所以在 X4 是活动 LE Audio 设备时，由模块拒绝 `A2dpService.setActiveDevice(X4)`，覆盖佩戴检测的 AVRCP / A2DP 消息和低延迟状态机等入口。
 - **Game_Vnd**：调用固件的 WALT 入口（`setGameMode(false, true)`），并通过 Smart Audio 接口通知耳机侧。关闭时请求恢复两端状态。
 - **场景**：「按播放内容切换」改的是蓝牙原生库读取的 `persist.sys.bt.coexist_optimization`；「固定为 Game」拦截 `LeAudioNativeInterface.setInGame`。
