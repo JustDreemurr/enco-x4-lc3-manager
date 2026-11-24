@@ -1,0 +1,18 @@
+<resources>
+    <item type="id" name="open_settings" />
+    <item type="id" name="navigate_back" />
+    <item type="id" name="route_switch" />
+    <item type="id" name="game_switch" />
+    <item type="id" name="restart_scope" />
+    <item type="id" name="reconnect_x4" />
+    <item type="id" name="bluetooth_settings" />
+    <item type="id" name="refresh_interval" />
+    <item type="id" name="display_mode" />
+    <item type="id" name="palette_grid" />
+    <item type="id" name="open_enhance" />
+    <item type="id" name="scene_switch_by_content" />
+    <item type="id" name="scene_lock_game" />
+    <item type="id" name="open_diagnostics" />
+    <item type="id" name="diag_rerun" />
+    <item type="id" name="diag_export" />
+</resources>
