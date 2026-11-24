@@ -54,6 +54,8 @@ final class Diagnostics {
             "\\b(?:[0-9A-Fa-f]{2}:){4}([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})\\b");
     private static final Pattern PREFERENCE_KEY = Pattern.compile(RouteSettings.PREFERENCE_KEY_PATTERN);
     private static final Pattern DECISION = Pattern.compile("decision=(.*?), failure=(.*)$");
+    private static final String FEATURES = "  Encore features: ";
+    private static final String MISSING = "missing:";
 
     static final String CHECK_SCRIPT = "echo '=== props ==='\n"
             + "for p in persist.sys.bt.leacoexist " + RouteSettings.COEXIST_PROPERTY
@@ -110,14 +112,18 @@ final class Diagnostics {
         boolean root = output.access() == Access.GRANTED;
         List<Check> checks = new ArrayList<>();
 
-        boolean supported = RouteSettings.SUPPORTED_FIRMWARE.equals(Build.DISPLAY);
-        add(checks, Group.ENVIRONMENT, supported ? Level.OK : Level.FAIL, R.string.diag_firmware,
-                supported ? Build.DISPLAY : string(R.string.diag_firmware_unsupported, Build.DISPLAY));
+        boolean tested = RouteSettings.SUPPORTED_FIRMWARE.equals(Build.DISPLAY);
+        add(checks, Group.ENVIRONMENT, tested ? Level.OK : Level.INFO, R.string.diag_firmware,
+                string(tested ? R.string.diag_firmware_tested : R.string.diag_firmware_untested, Build.DISPLAY));
         add(checks, Group.ENVIRONMENT, root ? Level.OK : Level.FAIL, R.string.diag_root,
                 string(root ? R.string.diag_root_ok : R.string.diag_root_denied));
         checks.add(lsposedCheck(environment));
         if (environment.lsposed() == Lsposed.UP_TO_DATE || environment.lsposed() == Lsposed.STALE) {
             checks.add(moduleCheck(environment, encore, root));
+            Check features = featureCheck(encore);
+            if (features != null) {
+                checks.add(features);
+            }
         }
         if (!root) {
             return new Result(checks, Map.of(), now(), Requirements.UNKNOWN);
@@ -234,6 +240,57 @@ final class Diagnostics {
         }
         return new Check(Group.ENVIRONMENT, Level.OK, string(R.string.diag_module),
                 string(R.string.diag_module_running, version, environment.pid()));
+    }
+
+    /**
+     * Summarises which firmware bindings resolved in the Bluetooth process; null when the running module does not
+     * report them. route and dualMode are required for X4 routing, the rest only disable their own feature.
+     */
+    private Check featureCheck(List<String> encore) {
+        Map<String, String> features = new LinkedHashMap<>();
+        for (String line : encore) {
+            if (line.startsWith(FEATURES)) {
+                for (String token : line.substring(FEATURES.length()).trim().split(" ")) {
+                    int split = token.indexOf('=');
+                    if (split > 0) {
+                        features.put(token.substring(0, split), token.substring(split + 1));
+                    }
+                }
+            }
+        }
+        if (features.isEmpty()) {
+            return null;
+        }
+        for (String required : List.of("route", "dualMode")) {
+            String state = features.getOrDefault(required, "pending");
+            if (state.startsWith(MISSING)) {
+                return new Check(Group.ENVIRONMENT, Level.FAIL, string(R.string.diag_features),
+                        string(R.string.diag_features_required, state.substring(MISSING.length())),
+                        string(R.string.diag_features_hint), null);
+            }
+        }
+        List<String> unavailable = new ArrayList<>();
+        boolean pending = false;
+        for (Map.Entry<String, String> entry : features.entrySet()) {
+            int label = switch (entry.getKey()) {
+                case "wear" -> R.string.feature_wear;
+                case "whitelist" -> R.string.feature_whitelist;
+                case "gameExit" -> R.string.feature_game_exit;
+                case "gameVnd" -> R.string.feature_game_vnd;
+                default -> 0;
+            };
+            if (entry.getValue().startsWith(MISSING) && label != 0) {
+                unavailable.add(string(label));
+            }
+            pending |= "pending".equals(entry.getValue());
+        }
+        if (!unavailable.isEmpty()) {
+            return new Check(Group.ENVIRONMENT, Level.WARN, string(R.string.diag_features),
+                    string(R.string.diag_features_partial, String.join("、", unavailable)),
+                    string(R.string.diag_features_hint), null);
+        }
+        return check(Group.ENVIRONMENT, pending ? Level.INFO : Level.OK, R.string.diag_features,
+                pending ? R.string.diag_features_pending : R.string.diag_features_ok);
     }
 
     private Check x4Check(Snapshot snapshot) {

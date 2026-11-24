@@ -1431,7 +1431,7 @@ public final class ManagerActivity extends Activity {
     private void refreshRoute() {
         routePreferences = null;
         XposedService service = app().service();
-        if (RouteSettings.SUPPORTED_FIRMWARE.equals(Build.DISPLAY) && service != null) {
+        if (service != null) {
             try {
                 if (service.getScope().contains(RouteSettings.BLUETOOTH_PACKAGE)) {
                     SharedPreferences remote = service.getRemotePreferences(RouteSettings.FILE);
@@ -1794,22 +1794,19 @@ public final class ManagerActivity extends Activity {
         if (audio == null) {
             return;
         }
-        String status;
-        if (!RouteSettings.SUPPORTED_FIRMWARE.equals(Build.DISPLAY)) {
-            status = getString(R.string.module_unsupported);
-        } else {
-            LsposedStatus lsposed = lsposedStatus();
-            status = switch (lsposed.state()) {
-                case NO_SERVICE -> getString(R.string.module_waiting);
-                case NO_SCOPE -> getString(R.string.module_scope);
-                case NOT_LOADED -> getString(R.string.module_not_loaded);
-                case UP_TO_DATE -> getString(R.string.module_running, lsposed.pid());
-                case STALE -> getString(R.string.module_stale);
-                case RELOADING -> getString(R.string.module_reloading);
-                case FAILED -> getString(R.string.module_failed);
-                case ERROR -> getString(R.string.module_error);
-            };
-        }
+        LsposedStatus lsposed = lsposedStatus();
+        boolean unsupported = "unsupported".equals(snapshot.requirements().module().get("state"));
+        String status = switch (lsposed.state()) {
+            case NO_SERVICE -> getString(R.string.module_waiting);
+            case NO_SCOPE -> getString(R.string.module_scope);
+            case NOT_LOADED -> getString(R.string.module_not_loaded);
+            case UP_TO_DATE -> unsupported ? getString(R.string.module_unsupported)
+                    : getString(R.string.module_running, lsposed.pid());
+            case STALE -> getString(R.string.module_stale);
+            case RELOADING -> getString(R.string.module_reloading);
+            case FAILED -> getString(R.string.module_failed);
+            case ERROR -> getString(R.string.module_error);
+        };
         swapText(audio.moduleStatus, status, true);
     }
 

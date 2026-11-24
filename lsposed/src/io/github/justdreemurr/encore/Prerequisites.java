@@ -42,6 +42,11 @@ final class Prerequisites {
                 R.string.req_power_saver_hint, Fix.POWER_SAVER)
                 : check(context, Level.OK, R.string.diag_power_saver, R.string.diag_off, 0, null));
         if (!requirements.reported()) {
+            String state = requirements.module().get("state");
+            if ("unsupported".equals(state) || "error".equals(state)) {
+                checks.add(check(context, Level.INFO, R.string.req_module, R.string.req_module_unsupported, 0, null));
+                return checks;
+            }
             checks.add(check(context, Level.INFO, R.string.req_module, R.string.req_module_missing,
                     R.string.req_restart_hint, Fix.RESTART_SCOPE));
             return checks;

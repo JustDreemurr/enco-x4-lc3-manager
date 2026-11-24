@@ -86,7 +86,7 @@ ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游�
 
 | 项目 | 要求 |
 | --- | --- |
-| 机型与固件 | 一加 13（PJZ110），`PJZ110_17.0.0.103(CN01)`。其他固件上模块不会启用 |
+| 机型与固件 | ColorOS / OxygenOS。在一加 13（PJZ110）的 `PJZ110_17.0.0.103(CN01)` 上实测。其他固件按功能检测启用，诊断页的「功能适配」会列出不可用的功能 |
 | LSPosed | 支持 libxposed API 102 的版本（如 LSPosed 2.2.1） |
 | Root | KernelSU / APatch / Magisk 均可。实时链路、场景切换和诊断需要授予 Encore 超级用户 |
 | 耳机 | OPPO Enco X4 |
@@ -149,7 +149,7 @@ ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游�
 
 | 分组 | 检测项 |
 | --- | --- |
-| 运行环境 | 固件适配、Root、LSPosed 作用域、蓝牙进程中的模块版本 |
+| 运行环境 | 固件、Root、LSPosed 作用域、蓝牙进程中的模块版本、功能适配 |
 | LE Audio 前置条件 | 双模共存、省电模式、白名单命中、配对、双模识别、双连接偏好、通话与媒体音频、LE Audio 连接状态 |
 | 连接 | 蓝牙、X4 当前路由与播放状态、路由决策 |
 | 冲突与场景 | 系统游戏态、旧方案模块的全局 LC3、LE Audio Native Filter、当前场景模式 |

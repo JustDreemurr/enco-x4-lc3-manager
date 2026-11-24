@@ -21,9 +21,12 @@ import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,10 +35,9 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class EncoreModule extends XposedModule {
     private static final String TAG = "Encore";
-    private static final String VERSION = "0.7.2";
+    private static final String VERSION = "0.7.3";
     private static final int EVENT_LIMIT = 80;
     private static final String BLUETOOTH_PACKAGE = RouteSettings.BLUETOOTH_PACKAGE;
-    private static final String TARGET_BUILD = RouteSettings.SUPPORTED_FIRMWARE;
     private static final String TARGET_NAME = "OPPO Enco X4";
     private static final String LOW_LATENCY_STATE_MACHINE =
             "com.oplus.bluetooth.feature.lowlatency.BluetoothLowLatencyStateMachine";
@@ -58,6 +60,14 @@ public final class EncoreModule extends XposedModule {
     private boolean bluetoothProcess;
     private boolean installed;
     private final ArrayDeque<String> events = new ArrayDeque<>();
+    /** Binding state per feature: "pending", "ok" or "missing:<member>". route and dualMode are required. */
+    private final Map<String, String> features = Collections.synchronizedMap(new LinkedHashMap<>());
+
+    {
+        for (String name : List.of("route", "dualMode", "wear", "whitelist", "gameExit", "gameVnd")) {
+            features.put(name, "pending");
+        }
+    }
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -78,9 +88,8 @@ public final class EncoreModule extends XposedModule {
             return;
         }
         report(Log.INFO, "Bluetooth package ready (first=" + param.isFirstPackage() + ")");
-        if (!TARGET_BUILD.equals(Build.DISPLAY)) {
-            report(Log.WARN, "Unsupported firmware; routing disabled: " + Build.DISPLAY);
-            return;
+        if (!RouteSettings.SUPPORTED_FIRMWARE.equals(Build.DISPLAY)) {
+            report(Log.INFO, "Untested firmware " + Build.DISPLAY + "; enabling features whose bindings resolve");
         }
         try {
             RouteHooks route = new RouteHooks(param.getClassLoader());
@@ -90,6 +99,7 @@ public final class EncoreModule extends XposedModule {
                         .intercept(chain -> {
                             Object adm = chain.getThisObject();
                             Object result = chain.proceed();
+                            route.checkVendorFeatures(adm);
                             route.installWearCheckHooks(adm);
                             route.installWhitelistHooks(adm);
                             route.installGameExitHook(adm);
@@ -100,6 +110,7 @@ public final class EncoreModule extends XposedModule {
                         .intercept(chain -> {
                             PrintWriter writer = (PrintWriter) chain.getArg(0);
                             writer.println("  Encore version: " + VERSION);
+                            writer.println("  Encore features: " + featureLine());
                             writer.println("  Encore: " + route.diagnostics());
                             writer.println("  Encore prerequisites: " + route.prerequisites(chain.getThisObject()));
                             dumpEvents(writer);
@@ -199,11 +210,62 @@ public final class EncoreModule extends XposedModule {
                 throw error;
             }
             installed = true;
+            feature("route", null);
             route.watchRouteSettings();
             report(Log.INFO, "Ready: Enco X4 LE Audio routing only");
         } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
-            report(Log.WARN, "Firmware bindings unavailable; routing disabled", error);
+            feature("route", error);
+            report(Log.WARN, "Required Bluetooth bindings missing; routing disabled", error);
+            installStatusDump(param.getClassLoader());
+            installed = true;
         }
+    }
+
+    /**
+     * Without the routing bindings, still report the version, the missing member and recent events in
+     * dumpsys bluetooth_manager so the manager can explain why Encore is inactive.
+     */
+    private void installStatusDump(ClassLoader loader) {
+        try {
+            Method dump = RouteHooks.method(RouteHooks.load(loader, "com.android.bluetooth.btservice.ActiveDeviceManager"),
+                    "dump", PrintWriter.class);
+            hook(dump).setExceptionMode(ExceptionMode.PROTECTIVE).intercept(chain -> {
+                PrintWriter writer = (PrintWriter) chain.getArg(0);
+                writer.println("  Encore version: " + VERSION);
+                writer.println("  Encore features: " + featureLine());
+                writer.println("  Encore prerequisites: state=unsupported");
+                dumpEvents(writer);
+                return chain.proceed();
+            });
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+            report(Log.WARN, "Could not report Encore status in Bluetooth dump", error);
+        }
+    }
+
+    /** Records whether a feature's firmware bindings resolved; error is null on success. */
+    private void feature(String name, Throwable error) {
+        features.put(name, error == null ? "ok" : "missing:" + missingMember(error));
+    }
+
+    private String featureLine() {
+        StringBuilder line = new StringBuilder();
+        synchronized (features) {
+            for (Map.Entry<String, String> entry : features.entrySet()) {
+                line.append(line.length() == 0 ? "" : " ").append(entry.getKey()).append('=').append(entry.getValue());
+            }
+        }
+        return line.toString();
+    }
+
+    /** The class, method or field the firmware lacks, cut at the first space so it fits one dump token. */
+    private static String missingMember(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && !(cause instanceof ReflectiveOperationException)) {
+            cause = cause.getCause();
+        }
+        String message = cause.getMessage();
+        String member = message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
+        return member.trim().split("\\s+")[0];
     }
 
     private void report(int level, String message) {
@@ -542,6 +604,36 @@ public final class EncoreModule extends XposedModule {
         }
 
         /**
+         * Resolves the vendor bindings that routing and Game_Vnd need once the OPLUS extension exists, so missing
+         * firmware members show up in diagnostics before X4 connects.
+         */
+        void checkVendorFeatures(Object adm) {
+            Object extension;
+            try {
+                extension = admExtension.get(adm);
+            } catch (ReflectiveOperationException error) {
+                return;
+            }
+            if (extension == null) {
+                return;
+            }
+            try {
+                vendorBindings(extension);
+                feature("dualMode", null);
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                feature("dualMode", error);
+                report(Log.WARN, "Dual-mode bindings unavailable; X4 routing disabled", error);
+            }
+            try {
+                GameVndControl.verify(extension.getClass().getClassLoader());
+                feature("gameVnd", null);
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                feature("gameVnd", error);
+                report(Log.WARN, "Game_Vnd bindings unavailable", error);
+            }
+        }
+
+        /**
          * ColorOS wear detection re-selects earbuds when they are put on. For dual-mode earbuds it chooses LE Audio
          * only while the system is in ultra game mode and otherwise makes them the HFP and A2DP device, which drops
          * X4 back to LHDC. While X4 routing is enabled, answer that one check as if game mode were on so the
@@ -585,8 +677,11 @@ public final class EncoreModule extends XposedModule {
                 });
                 deoptimize(process);
                 wearHooksInstalled = true;
+                feature("wear", null);
                 wearDecision = "Watching wear check";
             } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                wearHooksInstalled = true;
+                feature("wear", error);
                 wearDecision = "Wear check bindings unavailable";
                 report(Log.WARN, wearDecision, error);
             }
@@ -659,8 +754,11 @@ public final class EncoreModule extends XposedModule {
                 deoptimize(needed);
                 deoptimize(appsChanged);
                 whitelistHooksInstalled = true;
+                feature("whitelist", null);
                 whitelistDecision = "Watching dual-mode whitelist check";
             } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                whitelistHooksInstalled = true;
+                feature("whitelist", error);
                 whitelistDecision = "Dual-mode whitelist bindings unavailable";
                 report(Log.WARN, whitelistDecision, error);
             }
@@ -708,7 +806,10 @@ public final class EncoreModule extends XposedModule {
                 });
                 deoptimize(processMessage);
                 gameExitHookInstalled = true;
+                feature("gameExit", null);
             } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+                gameExitHookInstalled = true;
+                feature("gameExit", error);
                 report(Log.WARN, "Game low latency exit bindings unavailable", error);
             }
         }
@@ -1280,6 +1381,9 @@ public final class EncoreModule extends XposedModule {
                     lowLatencyExitAt = SystemClock.elapsedRealtime();
                     lastRequestedGroup = INVALID_GROUP;
                     lastRemoval = "Will route X4 back to LE Audio after game low latency exit. " + lastRemoval;
+                } else if (!suppressed && fromHfpSetup) {
+                    lastRequestedGroup = INVALID_GROUP;
+                    lastRemoval = "Will route X4 back to LE Audio after HFP setup. " + lastRemoval;
                 }
                 report(Log.INFO, lastRemoval);
                 return suppressed;
@@ -1595,6 +1699,25 @@ public final class EncoreModule extends XposedModule {
             setMode = RouteHooks.method(channelImpl, "setGameMode", boolean.class, boolean.class);
             getWalt = latency.getClass().getMethod("getWaltMode");
             sendWalt = RouteHooks.method(smartAudioType, "sendWaltMode", BluetoothDevice.class, boolean.class);
+        }
+
+        /**
+         * Checks that the WALT entry points exist. The feature cache only hands out the real native channel once
+         * the stack is up, so the instance itself is created when Game_Vnd is first requested.
+         */
+        static void verify(ClassLoader loader) throws ReflectiveOperationException {
+            Class<?> cache = RouteHooks.load(loader, "com.oplus.bluetooth.common.OplusFeatureCache");
+            RouteHooks.method(cache, "get", RouteHooks.load(loader, "com.oplus.bluetooth.common.IOplusCommonFeature"));
+            for (String type : List.of("com.oplus.bluetooth.common.interfaces.IOplusBluetoothNativeChannel",
+                    "com.oplus.bluetooth.common.interfaces.IBluetoothA2dpLowLatencyMode")) {
+                RouteHooks.field(RouteHooks.load(loader, type), "DEFAULT");
+            }
+            RouteHooks.method(RouteHooks.load(loader, "com.oplus.bluetooth.feature.nativechannel.OplusBtNativeChannel"),
+                    "setGameMode", boolean.class, boolean.class);
+            Class<?> smartAudioType = RouteHooks.load(loader,
+                    "com.oplus.bluetooth.common.interfaces.IOplusBluetoothSmartAudio");
+            RouteHooks.field(smartAudioType, "DEFAULT");
+            RouteHooks.method(smartAudioType, "sendWaltMode", BluetoothDevice.class, boolean.class);
         }
 
         void setMode(boolean game, boolean walt) throws ReflectiveOperationException {

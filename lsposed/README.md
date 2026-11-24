@@ -1,6 +1,10 @@
 # Encore 实现说明
 
-使用说明见仓库根目录的 [README](../README.md)。本文记录 Encore（包名 `io.github.justdreemurr.encore`）的实现细节、一加 13 实测数据和开发验证步骤。模块仅适配固件 `PJZ110_17.0.0.103(CN01)`，双模连接偏好、省电和多设备占用等条件仍由系统检查。双模白名单在路由接管开启时由模块放行，生效时转储出现 `Encore whitelist: Passed the dual-mode whitelist check for X4`。
+使用说明见仓库根目录的 [README](../README.md)。本文记录 Encore（包名 `io.github.justdreemurr.encore`）的实现细节、一加 13 实测数据和开发验证步骤。双模连接偏好、省电和多设备占用等条件仍由系统检查。双模白名单在路由接管开启时由模块放行，生效时转储出现 `Encore whitelist: Passed the dual-mode whitelist check for X4`。
+
+## 功能检测
+
+实测固件为 `PJZ110_17.0.0.103(CN01)`。模块不检查固件版本，而是在蓝牙进程中逐项绑定所需的类、方法和字段。`route`（AOSP 蓝牙路由入口）和 `dualMode`（OPLUS 双模判断）是 X4 路由的必需项，缺少任一项时路由不启用。`wear`、`whitelist`、`gameExit`、`gameVnd` 缺失时只停用对应功能。绑定结果写在 `dumpsys bluetooth_manager` 的 `Encore features:` 行，值为 `ok`、`pending`（蓝牙服务尚未就绪）或 `missing:<缺少的成员>`。必需项缺失时，转储仍会输出版本、`Encore features:` 和最近事件。
 
 ## 路由与低延迟
 
