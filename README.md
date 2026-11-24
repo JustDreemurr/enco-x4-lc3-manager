@@ -136,14 +136,23 @@ Game_Vnd 把重传次数从 5 降到 3，信号差时更容易丢包。关闭后
 - **Game_Vnd**：调用固件的 WALT 入口（`setGameMode(false, true)`），并通过 Smart Audio 接口通知耳机侧。关闭时请求恢复两端状态。
 - **场景**：「按播放内容切换」改的是蓝牙原生库读取的 `persist.sys.bt.coexist_optimization`；「固定为 Game」拦截 `LeAudioNativeInterface.setInGame`。
 
-实现细节和一加 13 实测数据见 [`prototype/lsposed/README.md`](prototype/lsposed/README.md)。
+实现细节和一加 13 实测数据见 [`lsposed/README.md`](lsposed/README.md)。
 
 ## 构建
+
+仓库分为两个独立部分，各自构建和发布：
+
+| 目录 | 内容 | 构建 |
+| --- | --- | --- |
+| `lsposed/` | Encore：LSPosed 模块与管理器 APK | `sh lsposed/build.sh` → `dist/encore.apk` |
+| `module/` | Enco X4 LC3 Manager：KernelSU / APatch / Magisk 模块（旧方案） | `./build.sh` → `dist/enco_x4_lc3-<version>.zip` |
+
+### Encore
 
 需要 JDK 17、Android 37 SDK，以及 libxposed `102.0.0` 的 api、service、interface AAR（默认从 Gradle 缓存读取，也可用 `LIBXPOSED_AAR`、`LIBXPOSED_SERVICE_AAR`、`LIBXPOSED_INTERFACE_AAR` 指定）。
 
 ```sh
-sh prototype/lsposed/build.sh    # 输出 dist/encore.apk
+sh lsposed/build.sh    # 输出 dist/encore.apk
 ```
 
 首次构建会生成调试签名 `dist/x4-le-route-debug.p12`，覆盖安装新版本时必须使用同一个签名。

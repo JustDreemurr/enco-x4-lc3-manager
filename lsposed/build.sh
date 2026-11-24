@@ -33,7 +33,7 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
-mkdir -p "$work/classes" "$work/dex" ../../dist
+mkdir -p "$work/classes" "$work/dex" ../dist
 
 unzip -p "$LIBXPOSED_AAR" classes.jar > "$work/api.jar"
 unzip -p "$LIBXPOSED_SERVICE_AAR" classes.jar > "$work/service.jar"
@@ -51,12 +51,12 @@ jar cf "$work/module.jar" -C "$work/classes" .
 (cd metadata && zip -q -0 -r "$work/unsigned.apk" META-INF/xposed)
 "$tools/zipalign" -f 4 "$work/unsigned.apk" "$work/aligned.apk"
 
-keystore=../../dist/x4-le-route-debug.p12
+keystore=../dist/x4-le-route-debug.p12
 if [ ! -f "$keystore" ]; then
   keytool -genkeypair -keystore "$keystore" -storetype PKCS12 -alias x4route \
-    -storepass android -keyalg RSA -keysize 2048 -validity 3650 -dname 'CN=Enco X4 LE Audio Prototype'
+    -storepass android -keyalg RSA -keysize 2048 -validity 3650 -dname 'CN=Encore'
 fi
-output=../../dist/encore.apk
+output=../dist/encore.apk
 "$tools/apksigner" sign --ks "$keystore" --ks-key-alias x4route --ks-pass pass:android \
   --out "$output" "$work/aligned.apk"
 "$tools/apksigner" verify "$output"

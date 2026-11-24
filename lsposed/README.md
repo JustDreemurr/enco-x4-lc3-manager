@@ -1,12 +1,12 @@
 # Encore 实现说明
 
-使用说明见仓库根目录的 [README](../../README.md)。本文记录 Encore（包名 `io.github.justdreemurr.encore`）的实现细节、一加 13 实测数据和开发验证步骤。模块仅适配固件 `PJZ110_17.0.0.103(CN01)`，双模连接偏好、白名单、省电和多设备占用等条件仍由系统检查。
+使用说明见仓库根目录的 [README](../README.md)。本文记录 Encore（包名 `io.github.justdreemurr.encore`）的实现细节、一加 13 实测数据和开发验证步骤。模块仅适配固件 `PJZ110_17.0.0.103(CN01)`，双模连接偏好、白名单、省电和多设备占用等条件仍由系统检查。
 
 ## 路由与低延迟
 
-原型通过 `ActiveDeviceManager` 调用 `LeAudioService.setActiveDevice()`，与 ColorOS 游戏低延迟路径共用 LE Audio 激活入口。系统蓝牙游戏态退出后，原型会在普通音频模式下为 X4 请求 LE Audio。
+模块通过 `ActiveDeviceManager` 调用 `LeAudioService.setActiveDevice()`，与 ColorOS 游戏低延迟路径共用 LE Audio 激活入口。系统蓝牙游戏态退出后，模块会在普通音频模式下为 X4 请求 LE Audio。
 
-在 Encore 中启用 `Game_Vnd` 后，原型会在 X4 重连时调用固件的 WALT 入口，请求高通低延迟配置。手机侧使用 `setGameMode(false, true)`，X4 的经典蓝牙连接就绪后，原型通过系统 Smart Audio 接口向这副耳机发送 WALT 通知。关闭开关或 X4 失去路由时，原型会请求恢复两端状态。关闭开关并重连可重新协商普通 LE Audio。ColorOS 全局游戏态、`GCP_TX` 和 `AudioGameMode` 由系统控制。
+在 Encore 中启用 `Game_Vnd` 后，模块会在 X4 重连时调用固件的 WALT 入口，请求高通低延迟配置。手机侧使用 `setGameMode(false, true)`，X4 的经典蓝牙连接就绪后，模块通过系统 Smart Audio 接口向这副耳机发送 WALT 通知。关闭开关或 X4 失去路由时，模块会请求恢复两端状态。关闭开关并重连可重新协商普通 LE Audio。ColorOS 全局游戏态、`GCP_TX` 和 `AudioGameMode` 由系统控制。
 
 一加 13 双耳串流实测如下。管理器的「实时链路」会显示当前连接的实际协商值。
 
@@ -19,11 +19,11 @@
 
 单独启用手机侧 WALT 时，听感对照出现了轻微电音，约 6 秒的控制器采样窗口内每耳有 4–6 个 ISO 发送单元被丢弃。v0.2.7 加入耳机侧通知后，实际串流仍为 `GAME_VND`，双耳为 5 ms / RTN 3。用户在这次对照中未听到电音，控制器仍记录到部分丢弃。关闭开关并重连可恢复 20 ms / RTN 5 的普通 LC3。
 
-原型在请求激活后的 3 秒内，最多拦截一次 ColorOS 低延迟状态机进入普通模式时对该 X4 组的自动撤销。拦截时要求 X4 的 LE Audio 连接仍有效、音频模式为普通模式，且没有有线输出、游戏态或其他活动 A2DP 耳机。
+模块在请求激活后的 3 秒内，最多拦截一次 ColorOS 低延迟状态机进入普通模式时对该 X4 组的自动撤销。拦截时要求 X4 的 LE Audio 连接仍有效、音频模式为普通模式，且没有有线输出、游戏态或其他活动 A2DP 耳机。
 
-X4 重连时，原型等待系统完成通话配置（HFP）初始化。如果系统在启动窗口内因 HFP 初始化撤下 X4 的 LE Audio，且同一副 X4 在首次请求后的 8 秒内重新成为活动媒体输出，原型可补发一次激活请求。
+X4 重连时，模块等待系统完成通话配置（HFP）初始化。如果系统在启动窗口内因 HFP 初始化撤下 X4 的 LE Audio，且同一副 X4 在首次请求后的 8 秒内重新成为活动媒体输出，模块可补发一次激活请求。
 
-`v0.1.12` 试验直接激活 LC3。在当前没有活动 A2DP 或 LE Audio 输出时，原型将首次 X4 A2DP 激活延后最多 5 秒，等系统处理完 HFP 且 X4 的 LE Audio 可串流后，直接请求 LE Audio。如果到期时仍无活动蓝牙媒体输出且 X4 的 A2DP 已连接，原型重新请求 A2DP。等待时的音频输出由系统决定。
+`v0.1.12` 试验直接激活 LC3。在当前没有活动 A2DP 或 LE Audio 输出时，模块将首次 X4 A2DP 激活延后最多 5 秒，等系统处理完 HFP 且 X4 的 LE Audio 可串流后，直接请求 LE Audio。如果到期时仍无活动蓝牙媒体输出且 X4 的 A2DP 已连接，模块重新请求 A2DP。等待时的音频输出由系统决定。
 
 ## 场景
 
@@ -63,7 +63,7 @@ OplusBluetoothWearCheck$WearCheckHandler.handleMessage
 需要 JDK 17、Android 37 SDK 和 libxposed `102.0.0` 的 API、service 和 interface AAR。构建脚本默认从 Gradle 缓存取 AAR，也可以通过 `LIBXPOSED_AAR`、`LIBXPOSED_SERVICE_AAR` 和 `LIBXPOSED_INTERFACE_AAR` 指定。脚本将本地签名的 APK 写入 `dist/encore.apk`。
 
 ```sh
-sh prototype/lsposed/build.sh
+sh lsposed/build.sh
 ```
 
 ## 真机验证
