@@ -1,21 +1,87 @@
-# Encore
+<p align="center">
+  <img src="docs/images/icon.png" width="112" alt="Encore 图标">
+</p>
 
-让 OPPO Enco X4 在 ColorOS / OxygenOS 上常驻 **LE Audio（LC3）** 的 LSPosed 模块与管理器。
+<h1 align="center">Encore</h1>
 
-ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游戏运行时才切到 LE Audio。Encore 注入蓝牙进程，只为 X4 请求 LE Audio，不开启系统全局游戏态，其他蓝牙耳机仍按系统默认方式连接。
+<p align="center">
+  让 OPPO Enco X4 在 ColorOS / OxygenOS 上常驻 LE Audio（LC3）的 LSPosed 模块与管理器<br>
+  只接管 X4，系统游戏态和其他蓝牙耳机保持原样
+</p>
+
+<p align="center">
+  <a href="https://github.com/JustDreemurr/enco-x4-lc3-manager/releases"><img src="https://img.shields.io/github/v/release/JustDreemurr/enco-x4-lc3-manager?filter=encore-v*&label=Encore&color=3B5F94" alt="Encore 最新版本"></a>
+  <a href="https://modules.lsposed.org/module/io.github.justdreemurr.encore"><img src="https://img.shields.io/badge/LSPosed-模块仓库-3B5F94" alt="LSPosed 模块仓库"></a>
+  <img src="https://img.shields.io/badge/LSPosed-API%20102-3B5F94" alt="LSPosed API 102">
+  <img src="https://img.shields.io/badge/耳机-OPPO%20Enco%20X4-7F6C9B" alt="耳机 OPPO Enco X4">
+</p>
+
+<p align="center">
+  <img src="docs/images/showcase.png" width="860" alt="Encore 的深色主页、浅色主页和诊断页">
+</p>
 
 > [!WARNING]
 > 本项目使用固件私有接口。路由接管在蓝牙进程内生效，「按播放内容切换」和诊断页的一键修复会写入持久系统设置。
 
-## 功能
+## 特色
 
-- **X4 路由接管**：X4 连接后直接请求 LE Audio，拦截 ColorOS 低延迟状态机对 X4 LE Audio 的自动撤销，并省去「先 LHDC、再切 LC3」的短暂切换。
-- **Game_Vnd 低延迟（实验性）**：请求高通 `GAME_VND` 配置，最大传输时延从 20 ms 降到 5 ms。
-- **场景控制**：按播放内容切换 Media / Game 场景，或把 X4 固定在 Game 场景。
-- **实时链路**：编码、LC3 帧长、每声道码率、最大传输时延、RTN、呈现延迟，以及左右耳的 RSSI 和丢包率。
-- **一键重连 X4**、**重启作用域**，改完设置不用进系统蓝牙页。
-- **诊断与日志**：逐项检查 X4 的 LE Audio 前置条件，提供对应的修复入口，支持导出日志。
-- MD3 / MD3 Expressive 界面，支持系统取色和九种配色。
+### 🎧 X4 专属 LE Audio 路由
+
+ColorOS 平时让 Enco X4 走经典蓝牙（LHDC / AAC），只有白名单游戏运行时才切到 LE Audio。Encore 注入蓝牙进程，只为 X4 请求 LC3。
+
+- 不开启系统全局游戏态，其他蓝牙耳机仍按系统默认方式连接
+- 拦截 ColorOS 低延迟状态机对 X4 LE Audio 的自动撤销
+- 连接时直接走 LE Audio，省去「先 LHDC、再切 LC3」的短暂切换
+- 摘下再戴回、自动恢复播放时保持 LE Audio，避免被切回 LHDC
+- 一键重连 X4、重启作用域，改完设置不用进系统蓝牙页
+
+### 📊 实时链路
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/main-light.png" alt="浅色主页的实时链路"></td>
+    <td width="50%"><img src="docs/images/main-dark.png" alt="深色主页的实时链路"></td>
+  </tr>
+  <tr>
+    <td align="center">Media 场景 · 124 kbps · 最大传输时延 100 ms</td>
+    <td align="center">Game 场景 · 80 kbps · 最大传输时延 20 ms</td>
+  </tr>
+</table>
+
+- 编码、采样率、LC3 帧长、每声道码率、最大传输时延、重传次数和呈现延迟
+- 左右耳 RSSI 与丢包率，来自蓝牙控制器的链路质量报告
+- 刷新间隔可选 1、2、5、10 秒
+
+### ⚡ 连接设置与场景控制
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/connection.png" alt="连接设置"></td>
+    <td width="50%"><img src="docs/images/enhance.png" alt="LE Audio Native Filter 增强"></td>
+  </tr>
+</table>
+
+- **Game_Vnd（实验性）**：请求高通 `GAME_VND` 配置，最大传输时延从 20 ms 降到 5 ms。信号差时可能丢包或有电音
+- **LE Audio Native Filter 增强**：配合 Native Filter（@Flyfish233）使用，可按播放内容切换 Media / Game 场景，也可把 X4 固定在 Game 场景
+
+### 🩺 前置条件诊断与日志
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/diagnostics.png" alt="诊断与日志"></td>
+    <td width="50%"><img src="docs/images/settings.png" alt="设置与配色"></td>
+  </tr>
+</table>
+
+- 逐项检查双模共存、省电模式、双模白名单应用、X4 双连接偏好、通话与媒体音频和双耳 LE Audio 连接
+- 条件不满足时主页会提示，诊断页提供对应的修复入口
+- 一键导出诊断日志，蓝牙地址和设备专属偏好键会自动脱敏
+
+### 🎨 Material 3 Expressive
+
+- 跟随系统 Monet 取色，另有八套预设配色
+- 浅色、深色或跟随系统
+- 矢量耳机图标支持动态取色与单色主题图标
 
 ## 兼容性
 
