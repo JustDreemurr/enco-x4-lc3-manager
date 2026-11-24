@@ -10,6 +10,10 @@ final class RouteSettings {
     static final String SCENE_FOLLOW = "follow";
     static final String SCENE_GAME = "game";
     static final String COEXIST_PROPERTY = "persist.sys.bt.coexist_optimization";
+    static final String DUAL_MODE_PROPERTY = "persist.sys.bt.leacoexist";
+    static final String PREFERENCE_URI = "content://com.oplus.appplatform.settings/global";
+    static final String PREFERENCE_KEY_PATTERN = "oplus_lea_dual_connection_preference_[0-9a-f]{64}";
+    static final String WHITELIST_APP = "com.superpowered.superpoweredlatency";
     static final String BLUETOOTH_PACKAGE = "com.android.bluetooth";
     static final String SUPPORTED_FIRMWARE = "PJZ110_17.0.0.103(CN01)";
 

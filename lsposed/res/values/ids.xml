@@ -15,4 +15,6 @@
     <item type="id" name="open_diagnostics" />
     <item type="id" name="diag_rerun" />
     <item type="id" name="diag_export" />
+    <item type="id" name="fix_action" />
+    <item type="id" name="prerequisite_banner" />
 </resources>

@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class EncoreModule extends XposedModule {
     private static final String TAG = "Encore";
-    private static final String VERSION = "0.6.3";
+    private static final String VERSION = "0.7.1";
     private static final int EVENT_LIMIT = 80;
     private static final String BLUETOOTH_PACKAGE = RouteSettings.BLUETOOTH_PACKAGE;
     private static final String TARGET_BUILD = RouteSettings.SUPPORTED_FIRMWARE;
@@ -95,6 +95,7 @@ public final class EncoreModule extends XposedModule {
                             PrintWriter writer = (PrintWriter) chain.getArg(0);
                             writer.println("  Encore version: " + VERSION);
                             writer.println("  Encore: " + route.diagnostics());
+                            writer.println("  Encore prerequisites: " + route.prerequisites(chain.getThisObject()));
                             dumpEvents(writer);
                             return chain.proceed();
                         }));
@@ -322,6 +323,7 @@ public final class EncoreModule extends XposedModule {
         private long reconnectId;
         private volatile String reconnectStatus = "0 IDLE";
         private VendorBindings vendor;
+        private PrerequisiteBindings prerequisiteBindings;
 
         RouteHooks(ClassLoader loader) throws ReflectiveOperationException {
             Class<?> adm = load(loader, "com.android.bluetooth.btservice.ActiveDeviceManager");
@@ -400,6 +402,91 @@ public final class EncoreModule extends XposedModule {
                     + "\n  Encore scene: " + sceneDecision
                     + "\n  Encore wear: " + wearDecision
                     + "\n  Encore reconnect: " + reconnectStatus;
+        }
+
+        /**
+         * Reports the firmware's own dual-connection conditions for X4, as OplusDualModeManagerImpl evaluates them,
+         * followed by a second line listing the installed dual-mode whitelist apps.
+         */
+        String prerequisites(Object adm) {
+            try {
+                Object extension = admExtension.get(adm);
+                Object adapterService = adapter.get(adm);
+                if (extension == null || adapterService == null) {
+                    return "state=unavailable\n  Encore low latency apps: ";
+                }
+                VendorBindings vendor = vendorBindings(extension);
+                Object dual = vendor.dualInstance.get(null);
+                if (dual == null) {
+                    return "state=unavailable\n  Encore low latency apps: ";
+                }
+                PrerequisiteBindings bindings = prerequisiteBindings(dual.getClass());
+                boolean lowLatency = flag(bindings.hasLowLatency, dual);
+                StringBuilder out = new StringBuilder("state=ok")
+                        .append(" feature=").append(bindings.featureEnabled.getBoolean(dual))
+                        .append(" powerSave=").append(bindings.powerSave.getBoolean(dual))
+                        .append(" lowLatency=").append(lowLatency);
+                BluetoothDevice x4 = null;
+                for (Object item : (Set<?>) bondedDevices.invoke(adapterService)) {
+                    if (item instanceof BluetoothDevice device && TARGET_NAME.equals(device.getName())
+                            && (x4 == null || flag(bindings.supportDual, dual, device))) {
+                        x4 = device;
+                    }
+                }
+                if (x4 == null) {
+                    out.append(" device=none");
+                } else {
+                    out.append(" device=found")
+                            .append(" dual=").append(flag(bindings.supportDual, dual, x4))
+                            .append(" pref=").append(flag(bindings.preference, dual, x4))
+                            .append(" needed=").append(flag(vendor.dualNeeded, dual, x4));
+                    Object preferences = bindings.preferenceManager.get(dual);
+                    Object keyDevice = bindings.keyDevice.invoke(dual, x4);
+                    Object key = preferences == null || keyDevice == null ? null
+                            : bindings.generateKey.invoke(preferences, keyDevice);
+                    BluetoothDevice master = keyDevice instanceof BluetoothDevice device ? device : x4;
+                    out.append(" prefKey=").append(key)
+                            .append(" hfp=").append(policy(service(headsetService, adapterService), master))
+                            .append(" a2dp=").append(policy(service(a2dpService, adapterService), master));
+                    Object le = service(leService, adapterService);
+                    if (le != null) {
+                        int leDevices = 0;
+                        for (Object item : (List<?>) leConnected.invoke(le)) {
+                            if (item instanceof BluetoothDevice device && TARGET_NAME.equals(device.getName())) {
+                                leDevices++;
+                            }
+                        }
+                        out.append(" le=").append(leDevices);
+                    }
+                }
+                Object helper = bindings.helper.get(dual);
+                Object apps = helper == null ? null : bindings.installedApps.get(helper);
+                out.append("\n  Encore low latency apps: ");
+                if (apps instanceof Set<?> set) {
+                    synchronized (set) {
+                        out.append(String.join(",", set.stream().map(String::valueOf).sorted().toList()));
+                    }
+                }
+                return out.toString();
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                return "state=error " + error.getClass().getSimpleName() + "\n  Encore low latency apps: ";
+            }
+        }
+
+        /** The profile's connection policy for the device, or the failure as text. */
+        private String policy(Object profile, BluetoothDevice device) {
+            if (profile == null) {
+                return "none";
+            }
+            try {
+                Method method = profile.getClass().getMethod("getConnectionPolicy", BluetoothDevice.class);
+                method.setAccessible(true);
+                return String.valueOf(method.invoke(profile, device));
+            } catch (java.lang.reflect.InvocationTargetException error) {
+                return "error:" + error.getCause().getClass().getSimpleName();
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                return "error:" + error.getClass().getSimpleName();
+            }
         }
 
         void watchRouteSettings() {
@@ -1202,6 +1289,13 @@ public final class EncoreModule extends XposedModule {
             return vendor;
         }
 
+        private synchronized PrerequisiteBindings prerequisiteBindings(Class<?> dual) throws ReflectiveOperationException {
+            if (prerequisiteBindings == null) {
+                prerequisiteBindings = new PrerequisiteBindings(dual);
+            }
+            return prerequisiteBindings;
+        }
+
         private String routeBlocker(Object adm, Context context, Object extension)
                 throws ReflectiveOperationException {
             AudioManager audio = (AudioManager) audioManager.get(adm);
@@ -1352,6 +1446,32 @@ public final class EncoreModule extends XposedModule {
             dualInstance = RouteHooks.field(dual, "sInstance");
             dualNeeded = RouteHooks.method(dual, "isDualConnectionNeeded", BluetoothDevice.class);
             occupied = RouteHooks.method(dual, "isEarbudsMultiConnOccupied", BluetoothDevice.class);
+        }
+    }
+
+    private static final class PrerequisiteBindings {
+        final Field featureEnabled;
+        final Field powerSave;
+        final Field helper;
+        final Field preferenceManager;
+        final Field installedApps;
+        final Method supportDual;
+        final Method preference;
+        final Method hasLowLatency;
+        final Method keyDevice;
+        final Method generateKey;
+
+        PrerequisiteBindings(Class<?> dual) throws ReflectiveOperationException {
+            featureEnabled = RouteHooks.field(dual, "mIsDualModeFeatureEnabled");
+            powerSave = RouteHooks.field(dual, "mIsPowerSaveMode");
+            helper = RouteHooks.field(dual, "mDualModeHelper");
+            preferenceManager = RouteHooks.field(dual, "mPreferenceManager");
+            installedApps = RouteHooks.field(helper.getType(), "mInstalledLowLatencyPackages");
+            supportDual = RouteHooks.method(dual, "isSupportDualConnection", BluetoothDevice.class);
+            preference = RouteHooks.method(dual, "getDualConnectionPreference", BluetoothDevice.class);
+            hasLowLatency = RouteHooks.method(dual, "hasLowLatencyPackage");
+            keyDevice = RouteHooks.method(dual, "getPreferenceKeyDevice", BluetoothDevice.class);
+            generateKey = RouteHooks.method(preferenceManager.getType(), "generatePreferenceKey", BluetoothDevice.class);
         }
     }
 }

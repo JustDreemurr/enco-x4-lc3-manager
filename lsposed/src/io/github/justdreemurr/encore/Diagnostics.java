@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +21,7 @@ import java.util.zip.ZipOutputStream;
 
 import io.github.justdreemurr.encore.LinkMonitor.Access;
 import io.github.justdreemurr.encore.LinkMonitor.RootOutput;
+import io.github.justdreemurr.encore.LinkMonitor.Requirements;
 import io.github.justdreemurr.encore.LinkMonitor.Route;
 import io.github.justdreemurr.encore.LinkMonitor.Snapshot;
 
@@ -27,17 +29,22 @@ import io.github.justdreemurr.encore.LinkMonitor.Snapshot;
 final class Diagnostics {
     enum Level { OK, INFO, WARN, FAIL }
 
-    enum Group { ENVIRONMENT, CONNECTION, CONFLICTS }
+    enum Group { ENVIRONMENT, PREREQUISITES, CONNECTION, CONFLICTS }
 
     enum Lsposed { NO_SERVICE, NO_SCOPE, NOT_LOADED, UP_TO_DATE, STALE, RELOADING, FAILED, ERROR }
 
-    record Check(Group group, Level level, String title, String detail) {}
+    /** hint and fix are null when the check needs no action. */
+    record Check(Group group, Level level, String title, String detail, String hint, Prerequisites.Fix fix) {
+        Check(Group group, Level level, String title, String detail) {
+            this(group, level, title, detail, null, null);
+        }
+    }
 
     /** State only the app process can see: firmware, LSPosed service and saved settings. */
     record Environment(String appVersion, Lsposed lsposed, int pid, boolean routeEnabled, boolean gameVnd,
             String sceneLock) {}
 
-    record Result(List<Check> checks, Map<String, String> files, String time) {}
+    record Result(List<Check> checks, Map<String, String> files, String time, Requirements requirements) {}
 
     private static final String SECTION = "=== ";
     private static final String FILE_PREFIX = "file:";
@@ -45,6 +52,7 @@ final class Diagnostics {
     private static final String FILTER_MODULE = "lea_native_filter";
     private static final Pattern FULL_MAC = Pattern.compile(
             "\\b(?:[0-9A-Fa-f]{2}:){4}([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})\\b");
+    private static final Pattern PREFERENCE_KEY = Pattern.compile(RouteSettings.PREFERENCE_KEY_PATTERN);
     private static final Pattern DECISION = Pattern.compile("decision=(.*?), failure=(.*)$");
 
     static final String CHECK_SCRIPT = "echo '=== props ==='\n"
@@ -112,20 +120,16 @@ final class Diagnostics {
             checks.add(moduleCheck(environment, encore, root));
         }
         if (!root) {
-            return new Result(checks, Map.of(), now());
+            return new Result(checks, Map.of(), now(), Requirements.UNKNOWN);
         }
 
         boolean bluetoothOn = "1".equals(settings.get("bluetooth_on"));
         add(checks, Group.CONNECTION, bluetoothOn ? Level.OK : Level.FAIL, R.string.diag_bluetooth,
                 string(bluetoothOn ? R.string.diag_on : R.string.diag_bluetooth_off));
-        boolean saver = "1".equals(settings.get("low_power"));
-        add(checks, Group.CONNECTION, saver ? Level.WARN : Level.OK, R.string.diag_power_saver,
-                string(saver ? R.string.diag_power_saver_on : R.string.diag_off));
-        boolean coexist = "true".equals(props.get("persist.sys.bt.leacoexist"));
-        add(checks, Group.CONNECTION, coexist ? Level.OK : Level.FAIL, R.string.diag_coexist,
-                string(coexist ? R.string.diag_on : R.string.diag_coexist_off));
         List<String> liveLines = sections.get("live");
         Snapshot live = liveLines == null ? null : LinkMonitor.parse(liveLines, new HashMap<>());
+        Requirements requirements = live == null ? Requirements.UNKNOWN : live.requirements();
+        checks.addAll(Prerequisites.evaluate(context, requirements));
         boolean x4 = live != null && live.device() != null && live.device().contains("Enco X4");
         checks.add(x4Check(x4 ? live : null));
         checks.add(routeCheck(environment, encore, x4 && live.route() == Route.A2DP));
@@ -164,7 +168,8 @@ final class Diagnostics {
                 files.put(section.getKey().substring(FILE_PREFIX.length()), String.join("\n", section.getValue()));
             }
         }
-        return new Result(checks, files, now());
+        checks.sort(Comparator.comparing(Check::group));
+        return new Result(checks, files, now(), requirements);
     }
 
     /** Writes the summary and collected files as a zip, with Bluetooth addresses reduced to their last two bytes. */
@@ -314,7 +319,8 @@ final class Diagnostics {
     }
 
     static String redact(String text) {
-        return FULL_MAC.matcher(text).replaceAll("XX:XX:XX:XX:$1");
+        return PREFERENCE_KEY.matcher(FULL_MAC.matcher(text).replaceAll("XX:XX:XX:XX:$1"))
+                .replaceAll("[redacted preference key]");
     }
 
     private static String now() {

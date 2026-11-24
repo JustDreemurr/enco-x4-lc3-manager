@@ -33,8 +33,10 @@ final class LinkMonitor {
             + "|Device \\[|Audio Locations:|^[[:space:]]+[0-9]+[[:space:]]+true[[:space:]]+sink"
             + "|Monitoring, Handle: 0x[0-9a-f]+, ISO|SDU Interval:|Current Codec:|^A2DP .* State:$"
             + "|^  Config: Rate=|mIsPlaying:|^  Encore reconnect: |^ IsInCall: .*IsInGame: "
-            + "|handle(A2dp|LeAudio)ActiveDeviceChanged: '\n"
-            + "echo \"Encore coexist property: [$(getprop " + RouteSettings.COEXIST_PROPERTY + ")]\"";
+            + "|handle(A2dp|LeAudio)ActiveDeviceChanged: |^  Encore (prerequisites|low latency apps): '\n"
+            + "echo \"Encore coexist property: [$(getprop " + RouteSettings.COEXIST_PROPERTY + ")]\"\n"
+            + "echo \"Encore dual mode property: [$(getprop " + RouteSettings.DUAL_MODE_PROPERTY + ")]\"\n"
+            + "echo \"Encore power saver: [$(settings get global low_power)]\"";
     private static final String RESTART_SCRIPT = "if [ \"$(settings get global bluetooth_on)\" = 0 ]; then"
             + " echo off; else svc bluetooth disable >/dev/null 2>&1"
             + " && cmd bluetooth_manager wait-for-state:STATE_OFF >/dev/null 2>&1"
@@ -55,6 +57,8 @@ final class LinkMonitor {
     private static final Pattern RECONNECT = Pattern.compile("^Encore reconnect: (\\d+) ([A-Z_]+)$");
     private static final Pattern ACTIVATION = Pattern.compile("handle(A2dp|LeAudio)ActiveDeviceChanged: (\\S+?),");
     private static final Pattern COEXIST_PROPERTY = Pattern.compile("^Encore coexist property: \\[(.*)]$");
+    private static final Pattern DUAL_MODE_PROPERTY = Pattern.compile("^Encore dual mode property: \\[(.*)]$");
+    private static final Pattern POWER_SAVER = Pattern.compile("^Encore power saver: \\[(.*)]$");
     private static final DateTimeFormatter REPORT_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     enum Access { PENDING, GRANTED, DENIED }
@@ -93,15 +97,40 @@ final class LinkMonitor {
         }
     }
 
+    /**
+     * Conditions for the firmware to keep X4's LE Audio connection. dualModeProperty and powerSaver come from the
+     * root shell (null when unknown); module holds the Bluetooth process report (empty when the module is not running
+     * a version that reports it).
+     */
+    record Requirements(String dualModeProperty, String powerSaver, Map<String, String> module, List<String> apps) {
+        static final Requirements UNKNOWN = new Requirements(null, null, Map.of(), List.of());
+
+        boolean reported() {
+            return "ok".equals(module.get("state"));
+        }
+
+        boolean flag(String key) {
+            return "true".equals(module.get(key));
+        }
+
+        int number(String key) {
+            try {
+                return Integer.parseInt(module.getOrDefault(key, "-1"));
+            } catch (NumberFormatException error) {
+                return -1;
+            }
+        }
+    }
+
     record Snapshot(Access access, Route route, String device, boolean streaming, String scenario,
             String codec, int sampleRateHz, int bitsPerSample, int frameUs, int sduOctets,
             int transportLatencyMs, int retransmissions, int presentationDelayUs, List<Ear> ears,
-            Reconnect reconnect, Scene scene) {
-        static final Snapshot PENDING = idle(Access.PENDING, Reconnect.UNKNOWN, Scene.UNKNOWN);
+            Reconnect reconnect, Scene scene, Requirements requirements) {
+        static final Snapshot PENDING = idle(Access.PENDING, Reconnect.UNKNOWN, Scene.UNKNOWN, Requirements.UNKNOWN);
 
-        static Snapshot idle(Access access, Reconnect reconnect, Scene scene) {
+        static Snapshot idle(Access access, Reconnect reconnect, Scene scene, Requirements requirements) {
             return new Snapshot(access, Route.NONE, null, false, null, null, 0, 0, 0, 0, 0, -1, 0, List.of(), reconnect,
-                    scene);
+                    scene, requirements);
         }
 
         boolean gameVnd() {
@@ -119,7 +148,9 @@ final class LinkMonitor {
                     + " latency=" + transportLatencyMs + " rtn=" + retransmissions
                     + " delay=" + presentationDelayUs + " ears=[" + ears.toString().trim() + "]"
                     + " reconnect=" + reconnect.id() + "/" + reconnect.state()
-                    + " coexist=[" + scene.coexistProperty() + "] inGame=" + scene.inGame();
+                    + " coexist=[" + scene.coexistProperty() + "] inGame=" + scene.inGame()
+                    + " requirements=[dual=" + requirements.dualModeProperty() + " saver=" + requirements.powerSaver()
+                    + " " + requirements.module() + " apps=" + requirements.apps() + "]";
         }
     }
 
@@ -195,7 +226,7 @@ final class LinkMonitor {
     }
 
     /**
-     * Runs a read-only root script on the monitor thread, with stdin detached so commands cannot consume
+     * Runs a root script on the monitor thread, with stdin detached so commands cannot consume
      * the shell's input. The result is delivered on the main thread.
      */
     void collect(String script, Consumer<RootOutput> done) {
@@ -257,7 +288,7 @@ final class LinkMonitor {
         try {
             snapshot = parse(openShell().run(DUMP_SCRIPT), qualityReports);
         } catch (RootDeniedException error) {
-            snapshot = Snapshot.idle(Access.DENIED, Reconnect.UNKNOWN, Scene.UNKNOWN);
+            snapshot = Snapshot.idle(Access.DENIED, Reconnect.UNKNOWN, Scene.UNKNOWN, Requirements.UNKNOWN);
         } catch (IOException error) {
             closeShell();
             snapshot = Snapshot.PENDING;
@@ -326,6 +357,10 @@ final class LinkMonitor {
         boolean a2dpPlaying = false;
         Reconnect reconnect = Reconnect.UNKNOWN;
         String coexistProperty = null;
+        String dualModeProperty = null;
+        String powerSaver = null;
+        Map<String, String> moduleReport = new HashMap<>();
+        List<String> apps = new ArrayList<>();
         boolean inGame = false;
         String lastActivated = null;
 
@@ -377,6 +412,25 @@ final class LinkMonitor {
             } else if (line.startsWith("Encore coexist property: ")) {
                 Matcher property = COEXIST_PROPERTY.matcher(line);
                 coexistProperty = property.matches() ? property.group(1) : null;
+            } else if (line.startsWith("Encore dual mode property: ")) {
+                Matcher property = DUAL_MODE_PROPERTY.matcher(line);
+                dualModeProperty = property.matches() ? property.group(1) : null;
+            } else if (line.startsWith("Encore power saver: ")) {
+                Matcher saver = POWER_SAVER.matcher(line);
+                powerSaver = saver.matches() ? saver.group(1) : null;
+            } else if (line.startsWith("Encore prerequisites: ")) {
+                for (String token : line.substring("Encore prerequisites: ".length()).split(" ")) {
+                    int split = token.indexOf('=');
+                    if (split > 0) {
+                        moduleReport.put(token.substring(0, split), token.substring(split + 1));
+                    }
+                }
+            } else if (line.startsWith("Encore low latency apps:")) {
+                for (String app : line.substring("Encore low latency apps:".length()).trim().split(",")) {
+                    if (!app.isBlank()) {
+                        apps.add(app.trim());
+                    }
+                }
             } else if (line.startsWith("IsInCall: ")) {
                 inGame = line.endsWith("IsInGame: true");
             } else if (line.contains("ActiveDeviceChanged: ")) {
@@ -418,6 +472,8 @@ final class LinkMonitor {
         qualityReports.values().removeIf(report -> now == null
                 || Math.abs(Duration.between(report.time(), now).getSeconds()) > REPORT_MAX_AGE_SECONDS);
         Scene scene = new Scene(coexistProperty, inGame);
+        Requirements requirements = new Requirements(dualModeProperty, powerSaver, Map.copyOf(moduleReport),
+                List.copyOf(apps));
         // On ColorOS dual-mode earbuds ActiveDeviceManager can keep the LE Audio record after A2DP takes the
         // output back, so the LE record alone does not prove where audio is going.
         boolean leStreaming = "STREAMING".equals(groupState);
@@ -438,7 +494,8 @@ final class LinkMonitor {
                 rate = match.find() ? Integer.parseInt(match.group(1)) * 1000 : 0;
             }
             return new Snapshot(Access.GRANTED, Route.LE_AUDIO, leDevice, streaming, scenario, codec, rate, 0,
-                    sduInterval, sdu, latency, retransmissions, presentationDelay, ears, reconnect, scene);
+                    sduInterval, sdu, latency, retransmissions, presentationDelay, ears, reconnect, scene,
+                    requirements);
         }
         if (a2dpDevice != null) {
             int rate = 0;
@@ -451,9 +508,9 @@ final class LinkMonitor {
                 }
             }
             return new Snapshot(Access.GRANTED, Route.A2DP, a2dpDevice, a2dpPlaying, scenario, a2dpCodec, rate,
-                    bits, 0, 0, 0, -1, 0, List.of(), reconnect, scene);
+                    bits, 0, 0, 0, -1, 0, List.of(), reconnect, scene, requirements);
         }
-        return Snapshot.idle(Access.GRANTED, reconnect, scene);
+        return Snapshot.idle(Access.GRANTED, reconnect, scene, requirements);
     }
 
     private static LocalDateTime reportTime(String monthDayTime) {

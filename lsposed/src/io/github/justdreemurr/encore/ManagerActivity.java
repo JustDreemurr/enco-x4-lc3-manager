@@ -126,6 +126,9 @@ public final class ManagerActivity extends Activity {
         ObjectAnimator spin;
         ActionButton reconnect;
         ObjectAnimator reconnectSpin;
+        LinearLayout banner;
+        TextView bannerDetail;
+        String bannerKey;
     }
 
     private static final class EnhanceViews {
@@ -169,6 +172,7 @@ public final class ManagerActivity extends Activity {
     private Diagnostics.Result diagnosticResult;
     private boolean diagnosing;
     private boolean exporting;
+    private boolean applyingFix;
     private boolean topBarRaised;
     private int topBarColor;
     private Scheme poppedScheme;
@@ -227,6 +231,7 @@ public final class ManagerActivity extends Activity {
         renderReconnect();
         diagnosing = false;
         exporting = false;
+        applyingFix = false;
         if (page == Page.DIAGNOSTICS) {
             runDiagnostics();
         }
@@ -255,6 +260,8 @@ public final class ManagerActivity extends Activity {
                 + " gameSaved=" + gameEnabled + " gameEditable=" + (audio != null && audio.game.isEnabled())
                 + " restarting=" + restarting + " reconnect=" + reconnectRequest + "/" + reconnectPhase);
         writer.println(prefix + "Live: " + snapshot.summary());
+        writer.println(prefix + "Banner: " + (audio == null ? null
+                : (audio.banner.getVisibility() == View.VISIBLE ? "shown " : "hidden ") + audio.bannerKey));
         writer.println(prefix + "Enhance: sceneLock=" + sceneLock + " writing=" + writingSwitchByContent
                 + " pending=" + pendingSwitchByContent + (enhance == null ? "" : " shown=["
                 + enhance.switchByContent.isChecked() + "/" + enhance.lockGame.isChecked() + "] status="
@@ -599,6 +606,26 @@ public final class ManagerActivity extends Activity {
         AudioViews views = new AudioViews();
         audio = views;
 
+        views.banner = column();
+        views.banner.setId(R.id.prerequisite_banner);
+        views.banner.setPadding(dp(20), dp(16), dp(20), dp(14));
+        views.banner.setBackground(shape(colors.tertiaryContainer(), 24));
+        TextView bannerTitle = label(R.string.banner_title, 16, colors.onTertiaryContainer(), true);
+        bannerTitle.setAccessibilityHeading(true);
+        views.banner.addView(bannerTitle);
+        views.bannerDetail = label(0, 14, colors.onTertiaryContainer(), false);
+        views.bannerDetail.setPadding(0, dp(4), 0, dp(10));
+        views.bannerDetail.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        views.banner.addView(views.bannerDetail);
+        ActionButton bannerAction = button(View.NO_ID, R.string.banner_action, R.drawable.ic_chevron_end,
+                shape(colors.onTertiaryContainer(), 20), colors.tertiaryContainer(),
+                () -> switchPage(Page.DIAGNOSTICS));
+        views.banner.addView(bannerAction.root(), new LinearLayout.LayoutParams(WRAP, dp(40)));
+        views.banner.setVisibility(View.GONE);
+        LinearLayout.LayoutParams bannerParams = new LinearLayout.LayoutParams(MATCH, WRAP);
+        bannerParams.bottomMargin = dp(16);
+        content.addView(views.banner, bannerParams);
+
         LinearLayout hero = new LinearLayout(this);
         hero.setGravity(Gravity.CENTER_VERTICAL);
         hero.setPadding(dp(22), dp(20), dp(18), dp(22));
@@ -685,6 +712,8 @@ public final class ManagerActivity extends Activity {
         addDescription(reconnectItem, R.string.summary_reconnect);
         addNavigationEntry(settings, R.id.open_enhance, R.string.enhance_entry_title, R.string.enhance_entry_summary,
                 Page.ENHANCE);
+        addNavigationEntry(settings, R.id.open_diagnostics, R.string.diag_entry_title, R.string.diag_entry_summary,
+                Page.DIAGNOSTICS);
         animateLayout(gameItem);
 
         addHeading(content, R.string.module_heading);
@@ -706,8 +735,6 @@ public final class ManagerActivity extends Activity {
         secondary.setMarginStart(dp(8));
         actions.addView(settingsButton.root(), secondary);
         listItem(module).addView(actions, new LinearLayout.LayoutParams(MATCH, WRAP));
-        addNavigationEntry(module, R.id.open_diagnostics, R.string.diag_entry_title, R.string.diag_entry_summary,
-                Page.DIAGNOSTICS);
         animateLayout(statusItem);
     }
 
@@ -763,7 +790,7 @@ public final class ManagerActivity extends Activity {
     }
 
     private void runDiagnostics() {
-        if (monitor == null || diagnosing || exporting) {
+        if (monitor == null || diagnosing || exporting || applyingFix || restarting) {
             return;
         }
         diagnosing = true;
@@ -777,7 +804,7 @@ public final class ManagerActivity extends Activity {
     }
 
     private void exportDiagnostics() {
-        if (diagnosing || exporting) {
+        if (diagnosing || exporting || applyingFix || restarting) {
             return;
         }
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
@@ -855,7 +882,7 @@ public final class ManagerActivity extends Activity {
             summary = getString(R.string.diag_checked, diagnosticResult.time(), ok, attention);
         }
         swapText(views.summary, summary, animate);
-        boolean busy = diagnosing || exporting;
+        boolean busy = diagnosing || exporting || applyingFix || restarting;
         for (ActionButton button : List.of(views.rerun, views.export)) {
             button.root().setEnabled(!busy);
             button.root().animate().alpha(busy ? 0.72f : 1f).setDuration(Motion.SHORT).start();
@@ -873,6 +900,7 @@ public final class ManagerActivity extends Activity {
                 shown = check.group();
                 addHeading(views.results, switch (shown) {
                     case ENVIRONMENT -> R.string.diag_group_environment;
+                    case PREREQUISITES -> R.string.diag_group_prerequisites;
                     case CONNECTION -> R.string.diag_group_connection;
                     case CONFLICTS -> R.string.diag_group_conflicts;
                 });
@@ -902,17 +930,136 @@ public final class ManagerActivity extends Activity {
         detail.setText(check.detail());
         detail.setPadding(0, dp(2), 0, 0);
         texts.addView(detail);
+        if (check.hint() != null && check.level() != Diagnostics.Level.OK) {
+            TextView hint = label(0, 13, colors.text(), false);
+            hint.setText(check.hint());
+            hint.setPadding(0, dp(6), 0, 0);
+            texts.addView(hint);
+        }
         row.addView(texts, new LinearLayout.LayoutParams(0, WRAP, 1));
         item.addView(row, new LinearLayout.LayoutParams(MATCH, WRAP));
+        if (check.fix() != null && check.level() != Diagnostics.Level.OK) {
+            Prerequisites.Fix fix = check.fix();
+            ActionButton action = button(R.id.fix_action, Prerequisites.fixLabel(fix), R.drawable.ic_check,
+                    shape(colors.secondaryContainer(), 20), colors.onSecondaryContainer(), () -> applyFix(fix));
+            action.root().setEnabled(!diagnosing && !exporting && !applyingFix && !restarting);
+            LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(WRAP, dp(40));
+            actionParams.setMarginStart(dp(26));
+            actionParams.topMargin = dp(10);
+            item.addView(action.root(), actionParams);
+        }
         item.setContentDescription(getString(switch (check.level()) {
             case OK -> R.string.diag_level_ok;
             case INFO -> R.string.diag_level_info;
             case WARN -> R.string.diag_level_warn;
             case FAIL -> R.string.diag_level_fail;
-        }) + "，" + check.title() + "，" + check.detail());
+        }) + "，" + check.title() + "，" + check.detail() + (check.hint() == null ? "" : "，" + check.hint()));
         item.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         for (int index = 0; index < row.getChildCount(); index++) {
             row.getChildAt(index).setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        }
+    }
+
+    /** Shows the unmet LE Audio conditions at the top of the main page; hidden when all are met or unknown. */
+    private void renderBanner() {
+        List<String> titles = new ArrayList<>();
+        for (Diagnostics.Check check : Prerequisites.unmet(Prerequisites.evaluate(this, snapshot.requirements()))) {
+            titles.add(check.title());
+        }
+        String key = String.join("、", titles);
+        if (key.equals(audio.bannerKey)) {
+            return;
+        }
+        audio.bannerKey = key;
+        if (titles.isEmpty()) {
+            audio.banner.setVisibility(View.GONE);
+            return;
+        }
+        audio.bannerDetail.setText(getString(R.string.banner_detail, titles.size(), key));
+        audio.banner.setVisibility(View.VISIBLE);
+    }
+
+    private void applyFix(Prerequisites.Fix fix) {
+        if (diagnosing || exporting || applyingFix || restarting) {
+            return;
+        }
+        switch (fix) {
+            case ENABLE_DUAL_MODE -> runRootFix("setprop " + RouteSettings.DUAL_MODE_PROPERTY + " true && "
+                    + "getprop " + RouteSettings.DUAL_MODE_PROPERTY, "true", R.string.fix_dual_mode_done, true);
+            case ENABLE_PREFERENCE -> {
+                String key = diagnosticResult.requirements().module().get("prefKey");
+                if (!Prerequisites.validPreferenceKey(key)) {
+                    showSnackbar(R.string.fix_failed);
+                    return;
+                }
+                runRootFix("if dumpsys bluetooth_manager | grep '^  Encore prerequisites: state=ok .* prefKey="
+                        + key + " ' >/dev/null; then\n"
+                        + "content call --uri " + RouteSettings.PREFERENCE_URI + " --method PUT_global --arg " + key
+                        + " --extra value:s:1 >/dev/null &&\n"
+                        + "content call --uri " + RouteSettings.PREFERENCE_URI + " --method GET_global --arg " + key
+                        + "\nfi",
+                        "Result: Bundle[{value=1}]", R.string.fix_preference_done, false);
+            }
+            case POWER_SAVER -> openSettings(new Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS));
+            case INSTALL_APP -> {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("market://details?id=" + RouteSettings.WHITELIST_APP)));
+                } catch (ActivityNotFoundException error) {
+                    openSettings(new Intent(Intent.ACTION_VIEW, Uri.parse(
+                            "https://play.google.com/store/apps/details?id=" + RouteSettings.WHITELIST_APP)));
+                }
+            }
+            case BLUETOOTH_SETTINGS -> openBluetoothSettings();
+            case RECONNECT -> reconnectX4();
+            case RESTART_SCOPE -> restartScope();
+        }
+    }
+
+    /** Runs a root write, checks its exact readback, then refreshes the diagnosis. */
+    private void runRootFix(String script, String expected, int done, boolean restartAfter) {
+        if (monitor == null) {
+            showSnackbar(R.string.fix_failed);
+            return;
+        }
+        applyingFix = true;
+        renderDiagnostics(true);
+        monitor.collect(script, output -> {
+            applyingFix = false;
+            if (output.access() == Access.DENIED) {
+                showSnackbar(R.string.fix_root);
+                renderDiagnostics(true);
+                return;
+            }
+            if (output.access() != Access.GRANTED || !output.lines().contains(expected)) {
+                showSnackbar(R.string.fix_failed);
+                runDiagnostics();
+                return;
+            }
+            if (restartAfter) {
+                restartScope();
+                renderDiagnostics(true);
+            } else {
+                showSnackbar(done);
+                applyingFix = true;
+                LinkMonitor currentMonitor = monitor;
+                host.postDelayed(() -> {
+                    if (monitor == currentMonitor) {
+                        applyingFix = false;
+                        runDiagnostics();
+                    }
+                }, 1500);
+            }
+        });
+    }
+
+    private boolean openSettings(Intent intent) {
+        try {
+            startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException error) {
+            showSnackbar(R.string.fix_unavailable);
+            return false;
         }
     }
 
@@ -1385,6 +1532,7 @@ public final class ManagerActivity extends Activity {
         if (audio == null) {
             return;
         }
+        renderBanner();
         Snapshot current = snapshot;
         boolean granted = current.access() == Access.GRANTED;
         int title;
@@ -1681,6 +1829,9 @@ public final class ManagerActivity extends Activity {
                 case FAILED -> R.string.restart_failed;
             });
             renderModule();
+            if (page == Page.DIAGNOSTICS) {
+                runDiagnostics();
+            }
         });
     }
 
@@ -1735,6 +1886,9 @@ public final class ManagerActivity extends Activity {
         }
         renderReconnect();
         showSnackbar(message);
+        if (page == Page.DIAGNOSTICS) {
+            runDiagnostics();
+        }
     }
 
     private void renderReconnect() {
